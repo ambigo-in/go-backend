@@ -1,0 +1,278 @@
+package dispatch
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/metrics"
+	"ambigo-backend/internal/notification"
+	"ambigo-backend/internal/ride"
+	"ambigo-backend/internal/websocket"
+)
+
+type Dispatcher struct {
+	Matcher   *Matcher
+	RideStore *ride.Store
+	WSManager *websocket.Manager
+	AuthStore *auth.Store
+	FCMClient *notification.FCMClient
+
+	acceptChannels  map[string]chan string
+	declineChannels map[string]chan string
+	mu              sync.RWMutex
+}
+
+func NewDispatcher(matcher *Matcher, rideStore *ride.Store, wsManager *websocket.Manager, authStore *auth.Store, fcmClient *notification.FCMClient) *Dispatcher {
+	d := &Dispatcher{
+		Matcher:         matcher,
+		RideStore:       rideStore,
+		WSManager:       wsManager,
+		AuthStore:       authStore,
+		FCMClient:       fcmClient,
+		acceptChannels:  make(map[string]chan string),
+		declineChannels: make(map[string]chan string),
+	}
+	wsManager.DeclineHandler = d
+	return d
+}
+
+// StartStaleRideCleanup runs every 60s and cancels SEARCHING rides older than 5 minutes.
+func (d *Dispatcher) StartStaleRideCleanup() {
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			count, err := d.RideStore.CancelStaleSearchingRides(ctx, 5*time.Minute)
+			cancel()
+			if err != nil {
+				log.Printf("[Dispatcher] Stale ride cleanup error: %v", err)
+			} else if count > 0 {
+				log.Printf("[Dispatcher] Cancelled %d stale searching rides", count)
+			}
+		}
+	}()
+}
+
+// RequestRide starts the matching loop for a new ride
+func (d *Dispatcher) RequestRide(r *ride.Ride) error {
+	ctx := context.Background()
+
+	if err := d.RideStore.CreateRide(ctx, r); err != nil {
+		return err
+	}
+
+	rideID := r.ID.Hex()
+
+	// Create channels for this ride
+	d.mu.Lock()
+	d.acceptChannels[rideID] = make(chan string)
+	d.declineChannels[rideID] = make(chan string)
+	d.mu.Unlock()
+
+	go d.startMatchingLoop(r)
+
+	return nil
+}
+
+// HandleDriverAccept is called by the REST API when a driver clicks "Accept"
+func (d *Dispatcher) HandleDriverAccept(ctx context.Context, rideID string, driverID string) error {
+	// 1. Atomic Database Assignment
+	err := d.RideStore.AtomicAssignDriver(ctx, rideID, driverID)
+	if err != nil {
+		return err // Ride was already taken or cancelled
+	}
+
+	// 2. Signal the waiting matching loop to stop
+	d.mu.RLock()
+	ch, exists := d.acceptChannels[rideID]
+	d.mu.RUnlock()
+	if exists {
+		ch <- driverID
+	}
+
+	// 3. Notify the user via WebSockets
+	rideData, _ := d.RideStore.GetRideByID(ctx, rideID)
+	d.WSManager.SetActiveRide(driverID, rideID)
+	if rideData != nil {
+		payload := map[string]string{
+			"ride_id":   rideID,
+			"driver_id": driverID,
+			"status":    string(ride.StatusAssigned),
+		}
+		d.WSManager.SendToClient("user", rideData.UserID, websocket.EventRideUpdate, payload)
+		d.WSManager.SendToRideWatchers(rideID, websocket.EventRideUpdate, payload)
+	}
+
+	return nil
+}
+
+// HandleDriverDecline implements websocket.DeclineHandler.
+func (d *Dispatcher) HandleDriverDecline(ctx context.Context, rideID, driverID string) {
+	d.mu.RLock()
+	ch, exists := d.declineChannels[rideID]
+	d.mu.RUnlock()
+	if exists {
+		ch <- driverID
+	}
+}
+
+// sendFCMToDriver looks up the driver's FCM token and fires a push notification.
+// For SOS rides, the payload includes "is_sos":"true" so the native Android overlay activates.
+func (d *Dispatcher) sendFCMToDriver(driverID string, payload map[string]interface{}) {
+	if d.FCMClient == nil || d.AuthStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	token, err := d.AuthStore.GetDriverFCMToken(ctx, driverID)
+	if err != nil {
+		log.Printf("[Dispatcher] Failed to get FCM token for driver %s: %v", driverID, err)
+		return
+	}
+	if token == nil || *token == "" {
+		return
+	}
+
+	data := make(map[string]string)
+	for k, v := range payload {
+		data[k] = fmt.Sprintf("%v", v)
+	}
+
+	if payload["is_sos"] == true {
+		data["title"] = "EMERGENCY ALERT"
+	} else {
+		data["title"] = "New Ride Request"
+	}
+	data["body"] = fmt.Sprintf("Pickup: %v", payload["pickup_address"])
+
+	if err := d.FCMClient.SendDataMessage(ctx, *token, data); err != nil {
+		log.Printf("[Dispatcher] FCM push failed for driver %s: %v", driverID, err)
+	}
+}
+
+// persistDispatchMetadata updates the ride's dispatch_metadata in MongoDB.
+func (d *Dispatcher) persistDispatchMetadata(rideID string, meta *ride.DispatchMetadata) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	d.RideStore.UpdateDispatchMetadata(ctx, rideID, meta)
+}
+
+func (d *Dispatcher) startMatchingLoop(r *ride.Ride) {
+	rideIDStr := r.ID.Hex()
+	log.Printf("[Dispatcher] Starting matching loop for Ride %s", rideIDStr)
+
+	defer func() {
+		d.mu.Lock()
+		delete(d.acceptChannels, rideIDStr)
+		delete(d.declineChannels, rideIDStr)
+		d.mu.Unlock()
+	}()
+
+	pickupLng, pickupLat := r.Pickup.Coordinates[0], r.Pickup.Coordinates[1]
+	dropoffLng, dropoffLat := r.Drop.Coordinates[0], r.Drop.Coordinates[1]
+
+	ambTypeID := ""
+	if r.AmbTypeID != nil {
+		ambTypeID = *r.AmbTypeID
+	}
+	candidates, err := d.Matcher.FindBestDrivers(context.Background(), pickupLat, pickupLng, 5, ambTypeID)
+	if err != nil || len(candidates) == 0 {
+		log.Printf("[Dispatcher] No drivers found for Ride %s. Cancelling.", rideIDStr)
+		d.RideStore.UpdateRideStatus(context.Background(), rideIDStr, ride.StatusSearching, ride.StatusCancelled)
+		d.WSManager.SendToClient("user", r.UserID, websocket.EventError, websocket.ErrorPayload{
+			Message: "No drivers available. Please try again later.",
+		})
+		return
+	}
+
+	startTime := time.Now()
+	r.DispatchMetadata.CandidatesSearched = len(candidates)
+
+	for i, candidate := range candidates {
+		log.Printf("[Dispatcher] Ride %s: Offering to Driver %s (ETA: %ds) [Candidate %d/%d]",
+			rideIDStr, candidate.DriverID, candidate.ETASeconds, i+1, len(candidates))
+
+		fareVal := 0.0
+		driverShareVal := 0.0
+		if r.Fare != nil {
+			fareVal = r.Fare.Total
+			driverShareVal = r.Fare.DriverShare
+		}
+		
+		tripDistance := 0.0
+		if r.Route != nil {
+			tripDistance = r.Route.DistanceKm
+		}
+
+		payload := map[string]interface{}{
+			"ride_id":         rideIDStr,
+			"_id":             rideIDStr,
+			"user_id":         r.UserID,
+			"amb_type_id":     r.AmbTypeID,
+			"hospital_id":     r.HospitalID,
+			"pickup":          r.Pickup,
+			"pickup_lat":      pickupLat,
+			"pickup_lng":      pickupLng,
+			"pickup_address":  r.PickupAddress,
+			"drop":            r.Drop,
+			"dropoff_lat":     dropoffLat,
+			"dropoff_lng":     dropoffLng,
+			"drop_address":    r.DropAddress,
+			"distance_km":     tripDistance,          // Used by Driver App (trip distance)
+			"distance":        tripDistance,          // Used by Native Android Overlay (fallback for trip distance)
+			"pickup_distance": candidate.DistanceKm,  // Used by Driver App (pickup distance)
+			"eta_seconds":     candidate.ETASeconds,
+			"fare":            fareVal,               // Used by some V1 legacy paths
+			"cost":            driverShareVal,        // Used by Native Android Overlay for Estimated Fare
+			"payment_mode":    r.PaymentMode,
+			"is_sos":          r.EmergencyPriority > 0,
+			"time":            r.Time,
+			"created_at":      r.Time.CreatedAt,
+		}
+		log.Printf("[Dispatcher] Ride %s → Driver %s | cost=%.2f fare=%.2f distance=%.3f",
+			rideIDStr, candidate.DriverID, driverShareVal, fareVal, tripDistance)
+		d.WSManager.SendToClient("driver", candidate.DriverID, websocket.EventRideRequested, payload)
+		r.DispatchMetadata.OffersSent++
+		d.sendFCMToDriver(candidate.DriverID, payload)
+
+		d.mu.RLock()
+		acceptCh := d.acceptChannels[rideIDStr]
+		declineCh := d.declineChannels[rideIDStr]
+		d.mu.RUnlock()
+
+		select {
+		case acceptedDriverID := <-acceptCh:
+			if acceptedDriverID == candidate.DriverID {
+				r.DispatchMetadata.AssignmentLatencyMs = int(time.Since(startTime).Milliseconds())
+				log.Printf("[Dispatcher] Ride %s: Driver %s accepted the ride!", rideIDStr, candidate.DriverID)
+				metrics.ObserveDispatchLatency(time.Since(startTime))
+				d.persistDispatchMetadata(rideIDStr, &r.DispatchMetadata)
+				return
+			}
+		case declinedDriverID := <-declineCh:
+			if declinedDriverID == candidate.DriverID {
+				r.DispatchMetadata.OffersDeclined++
+				log.Printf("[Dispatcher] Ride %s: Driver %s declined. Moving to next.", rideIDStr, candidate.DriverID)
+			}
+		case <-time.After(30 * time.Second):
+			r.DispatchMetadata.OffersTimedOut++
+			log.Printf("[Dispatcher] Ride %s: Driver %s timed out. Moving to next.", rideIDStr, candidate.DriverID)
+		}
+	}
+
+	r.DispatchMetadata.AssignmentLatencyMs = int(time.Since(startTime).Milliseconds())
+	d.persistDispatchMetadata(rideIDStr, &r.DispatchMetadata)
+
+	log.Printf("[Dispatcher] Ride %s: All candidates exhausted. Cancelling.", rideIDStr)
+	d.RideStore.UpdateRideStatus(context.Background(), rideIDStr, ride.StatusSearching, ride.StatusCancelled)
+
+	d.WSManager.SendToClient("user", r.UserID, websocket.EventError, websocket.ErrorPayload{
+		Message: "All nearby drivers are busy. Please try again.",
+	})
+}
