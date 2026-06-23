@@ -46,13 +46,22 @@ type RideRequestedPayload struct {
 
 // RideDriverOfferedPayload is published when a ride is offered to a specific driver
 type RideDriverOfferedPayload struct {
-	RideID      string  `json:"ride_id"`
-	DriverID    string  `json:"driver_id"`
-	ETASeconds  int     `json:"eta_seconds"`
-	DistanceKm  float64 `json:"distance_km"`
-	Fare        float64 `json:"fare"`
-	DriverShare float64 `json:"driver_share"`
-	IsSOS       bool    `json:"is_sos"`
+	RideID           string  `json:"ride_id"`
+	DriverID         string  `json:"driver_id"`
+	UserID           string  `json:"user_id"`
+	PickupLat        float64 `json:"pickup_lat"`
+	PickupLng        float64 `json:"pickup_lng"`
+	PickupAddress    string  `json:"pickup_address"`
+	DropoffLat       float64 `json:"dropoff_lat"`
+	DropoffLng       float64 `json:"dropoff_lng"`
+	DropAddress      string  `json:"drop_address"`
+	ETASeconds       int     `json:"eta_seconds"`
+	PickupDistanceKm float64 `json:"pickup_distance_km"`
+	TripDistanceKm   float64 `json:"trip_distance_km"`
+	Fare             float64 `json:"fare"`
+	DriverShare      float64 `json:"driver_share"`
+	PaymentMode      string  `json:"payment_mode"`
+	IsSOS            bool    `json:"is_sos"`
 }
 
 // RideAcceptedPayload is published when a driver accepts a ride

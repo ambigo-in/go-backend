@@ -17,12 +17,39 @@ func NewWSNotifier(wsManager *Manager) *WSNotifier {
 }
 
 func (n *WSNotifier) SubscribeTo(bus *eventbus.InMemoryBus) {
+	bus.Subscribe(eventbus.ChannelRideDriverOffered, n.handleRideDriverOffered)
 	bus.Subscribe(eventbus.ChannelRideAccepted, n.handleRideAccepted)
 	bus.Subscribe(eventbus.ChannelRideArrived, n.handleRideStatusChanged)
 	bus.Subscribe(eventbus.ChannelRideStarted, n.handleRideStatusChanged)
 	bus.Subscribe(eventbus.ChannelRideCompleted, n.handleRideCompleted)
 	bus.Subscribe(eventbus.ChannelRideCancelled, n.handleRideCancelled)
 	bus.Subscribe(eventbus.ChannelDriverLocationUpdate, n.handleDriverLocationUpdate)
+}
+
+func (n *WSNotifier) handleRideDriverOffered(payload []byte) {
+	var p eventbus.RideDriverOfferedPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "ride:driver_offered").Msg("Unmarshal error")
+		return
+	}
+	msg := map[string]interface{}{
+		"ride_id":            p.RideID,
+		"user_id":            p.UserID,
+		"pickup_lat":         p.PickupLat,
+		"pickup_lng":         p.PickupLng,
+		"pickup_address":     p.PickupAddress,
+		"dropoff_lat":        p.DropoffLat,
+		"dropoff_lng":        p.DropoffLng,
+		"drop_address":       p.DropAddress,
+		"eta_seconds":        p.ETASeconds,
+		"distance_km":        p.TripDistanceKm,
+		"pickup_distance_km": p.PickupDistanceKm,
+		"fare":               p.Fare,
+		"cost":               p.DriverShare,
+		"payment_mode":       p.PaymentMode,
+		"is_sos":             p.IsSOS,
+	}
+	n.wsManager.SendToClient("driver", p.DriverID, EventRideRequested, msg)
 }
 
 func (n *WSNotifier) handleRideAccepted(payload []byte) {

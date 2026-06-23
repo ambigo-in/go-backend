@@ -197,16 +197,41 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride) {
 			driverShareVal = r.Fare.DriverShare
 		}
 
+		tripDistanceKm := 0.0
+		if r.Route != nil {
+			tripDistanceKm = r.Route.DistanceKm
+		}
+
 		r.DispatchMetadata.OffersSent++
 
+		pickupLat, pickupLng := 0.0, 0.0
+		if len(r.Pickup.Coordinates) == 2 {
+			pickupLng = r.Pickup.Coordinates[0]
+			pickupLat = r.Pickup.Coordinates[1]
+		}
+		dropoffLat, dropoffLng := 0.0, 0.0
+		if len(r.Drop.Coordinates) == 2 {
+			dropoffLng = r.Drop.Coordinates[0]
+			dropoffLat = r.Drop.Coordinates[1]
+		}
+
 		d.EventBus.PublishEvent(eventbus.ChannelRideDriverOffered, eventbus.RideDriverOfferedPayload{
-			RideID:      rideIDStr,
-			DriverID:    candidate.DriverID,
-			ETASeconds:  candidate.ETASeconds,
-			DistanceKm:  candidate.DistanceKm,
-			Fare:        fareVal,
-			DriverShare: driverShareVal,
-			IsSOS:       r.EmergencyPriority > 0,
+			RideID:           rideIDStr,
+			DriverID:         candidate.DriverID,
+			UserID:           r.UserID,
+			PickupLat:        pickupLat,
+			PickupLng:        pickupLng,
+			PickupAddress:    r.PickupAddress,
+			DropoffLat:       dropoffLat,
+			DropoffLng:       dropoffLng,
+			DropAddress:      r.DropAddress,
+			ETASeconds:       candidate.ETASeconds,
+			PickupDistanceKm: candidate.DistanceKm,
+			TripDistanceKm:   tripDistanceKm,
+			Fare:             fareVal,
+			DriverShare:      driverShareVal,
+			PaymentMode:      r.PaymentMode,
+			IsSOS:            r.EmergencyPriority > 0,
 		})
 
 		d.mu.RLock()

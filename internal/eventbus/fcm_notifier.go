@@ -46,8 +46,20 @@ func (n *FCMNotifier) handleRideOffered(payload []byte) {
 	}
 
 	data := map[string]string{
-		"ride_id": p.RideID,
-		"body":    fmt.Sprintf("Estimated fare: ₹%.2f", p.Fare),
+		"ride_id":         p.RideID,
+		"distance":        fmt.Sprintf("%.1f", p.TripDistanceKm),
+		"distance_km":     fmt.Sprintf("%.2f", p.TripDistanceKm),
+		"cost":            fmt.Sprintf("%.0f", p.DriverShare),
+		"fare":            fmt.Sprintf("%.2f", p.Fare),
+		"driver_share":    fmt.Sprintf("%.2f", p.DriverShare),
+		"pickup_lat":      fmt.Sprintf("%f", p.PickupLat),
+		"pickup_lng":      fmt.Sprintf("%f", p.PickupLng),
+		"pickup_address":  p.PickupAddress,
+		"dropoff_lat":     fmt.Sprintf("%f", p.DropoffLat),
+		"dropoff_lng":     fmt.Sprintf("%f", p.DropoffLng),
+		"drop_address":    p.DropAddress,
+		"payment_mode":    p.PaymentMode,
+		"body":            fmt.Sprintf("%.1f km · ₹%.0f", p.TripDistanceKm, p.DriverShare),
 	}
 	if p.IsSOS {
 		data["title"] = "EMERGENCY ALERT"
