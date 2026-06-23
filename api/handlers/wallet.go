@@ -8,6 +8,7 @@ import (
 
 	"ambigo-backend/api/middleware"
 	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/payment"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -15,13 +16,15 @@ import (
 
 type WalletHandler struct {
 	AuthStore     *auth.Store
+	EventBus      *eventbus.InMemoryBus
 	WalletStore   *payment.WalletStore
 	ZwitchService *payment.ZwitchService
 }
 
-func NewWalletHandler(authStore *auth.Store, wStore *payment.WalletStore, zService *payment.ZwitchService) *WalletHandler {
+func NewWalletHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, wStore *payment.WalletStore, zService *payment.ZwitchService) *WalletHandler {
 	return &WalletHandler{
 		AuthStore:     authStore,
+		EventBus:      eventBus,
 		WalletStore:   wStore,
 		ZwitchService: zService,
 	}
@@ -178,6 +181,10 @@ func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.WalletStore.InsertTransaction(r.Context(), tx)
+
+	h.EventBus.PublishEvent(eventbus.ChannelWalletWithdrawal, eventbus.WalletWithdrawalPayload{
+		DriverID: uidStr, Amount: req.Amount, Status: status,
+	})
 
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Withdrawal initiated, amount will be transferred shortly!!"})
 }

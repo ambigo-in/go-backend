@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/location"
 	"ambigo-backend/internal/metrics"
 	"encoding/json"
@@ -47,9 +48,12 @@ type Manager struct {
 
 	// AuthStore for looking up driver details (vehicle type, etc.)
 	AuthStore *auth.Store
+
+	// EventBus for publishing driver location updates
+	EventBus *eventbus.InMemoryBus
 }
 
-func NewManager(locStore *location.MemoryStore, authStore *auth.Store) *Manager {
+func NewManager(locStore *location.MemoryStore, authStore *auth.Store, eventBus *eventbus.InMemoryBus) *Manager {
 	return &Manager{
 		broadcast:        make(chan []byte),
 		register:         make(chan *Client),
@@ -59,6 +63,7 @@ func NewManager(locStore *location.MemoryStore, authStore *auth.Store) *Manager 
 		activeDriverRide: make(map[string]string),
 		LocStore:         locStore,
 		AuthStore:        authStore,
+		EventBus:         eventBus,
 	}
 }
 

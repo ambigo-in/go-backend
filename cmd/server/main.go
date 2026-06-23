@@ -16,6 +16,7 @@ import (
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/dispatch"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/location"
 	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/notification"
@@ -56,7 +57,10 @@ func main() {
 		log.Fatal().Err(err).Msg("Failed to ensure MongoDB indexes")
 	}
 
-	// 3. Setup Interfaces (Live State)
+	// 3. Setup EventBus (Pub/Sub for internal messaging)
+	eventBus := eventbus.NewInMemoryBus()
+
+	// 4. Setup Interfaces (Live State)
 	locationStore := location.NewMemoryStore()
 	locationStore.StartCleanupWorker() // Start background sweeper
 
@@ -80,13 +84,13 @@ func main() {
 	feedbackStore := ride.NewFeedbackStore(recordsDB)
 
 	// Initialize Services & Dispatcher
-	wsManager := websocket.NewManager(locationStore, authStore)
+	wsManager := websocket.NewManager(locationStore, authStore, eventBus)
 	go wsManager.Run() // Start WebSocket Hub
 	
 	routeClient := dispatch.NewRouteClient(appConfig.GoogleMapsAPIKey)
 	fcmClient := notification.NewFCMClient(context.Background(), appConfig.FirebaseCredentialsPath)
 	matcher := dispatch.NewMatcher(locationStore, routeClient)
-	dispatcher := dispatch.NewDispatcher(matcher, rideStore, wsManager, authStore, fcmClient)
+	dispatcher := dispatch.NewDispatcher(matcher, rideStore, eventBus, wsManager)
 	dispatcher.StartStaleRideCleanup()
 	
 	rzpService := payment.NewRazorpayService(appConfig.RazorpayKeyID, appConfig.RazorpayKeySecret)
@@ -94,15 +98,23 @@ func main() {
 	zwitchService := payment.NewZwitchService(appConfig.ZwitchKey, appConfig.ZwitchSecret, appConfig.ZwitchAccountID)
 
 	// Initialize Handlers
-	rideHandler := handlers.NewRideHandler(dispatcher, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore)
-	authHandler := handlers.NewAuthHandler(authStore, appConfig.JWTSecret)
+	rideHandler := handlers.NewRideHandler(dispatcher, eventBus, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore)
+	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret)
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore)
-	paymentHandler := handlers.NewPaymentHandler(paymentStore, rzpService, appConfig.RazorpayWebhookSecret)
-	adminHandler := handlers.NewAdminHandler(adminStore, authStore, counterStore, hospitalStore)
+	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, appConfig.RazorpayWebhookSecret)
+	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore)
 	sharedHandler := handlers.NewSharedHandler(cloudshopeService, counterStore, adminStore, hospitalStore)
-	walletHandler := handlers.NewWalletHandler(authStore, walletStore, zwitchService)
+	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackStore)
+
+	// Subscribe EventBus Subscribers
+	websocket.NewWSNotifier(wsManager).SubscribeTo(eventBus)
+	eventbus.NewFCMNotifier(fcmClient, authStore).SubscribeTo(eventBus)
+	eventbus.NewMetricsCollector().SubscribeTo(eventBus)
+	eventbus.NewCacheInvalidator(counterStore).SubscribeTo(eventBus)
+	eventbus.NewAuditLogger().SubscribeTo(eventBus)
+	eventbus.NewAnalyticsTracker().SubscribeTo(eventBus)
 
 	// Middlewares
 	jwtAuth := middleware.JWTAuth(appConfig.JWTSecret)

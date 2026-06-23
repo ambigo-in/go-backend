@@ -2,12 +2,13 @@ package eventbus
 
 import (
 	"ambigo-backend/interfaces"
+	"encoding/json"
 	"log"
 	"sync"
 )
 
 type InMemoryBus struct {
-	mu         sync.RWMutex
+	mu          sync.RWMutex
 	subscribers map[string][]chan []byte
 }
 
@@ -35,6 +36,15 @@ func (b *InMemoryBus) Publish(channel string, payload []byte) error {
 	return nil
 }
 
+// PublishEvent marshals a struct and publishes it on the given channel.
+func (b *InMemoryBus) PublishEvent(channel string, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return b.Publish(channel, data)
+}
+
 func (b *InMemoryBus) Subscribe(channel string, handler func(payload []byte)) error {
 	ch := make(chan []byte, 64)
 
@@ -43,8 +53,20 @@ func (b *InMemoryBus) Subscribe(channel string, handler func(payload []byte)) er
 	b.mu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[EventBus] Panic in subscriber for channel %s: %v", channel, r)
+			}
+		}()
 		for msg := range ch {
-			handler(msg)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						log.Printf("[EventBus] Panic in subscriber handler for channel %s: %v", channel, r)
+					}
+				}()
+				handler(msg)
+			}()
 		}
 	}()
 	return nil

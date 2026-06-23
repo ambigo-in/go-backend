@@ -10,6 +10,7 @@ import (
 	"net/http"
 
 	"ambigo-backend/api/middleware"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/payment"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -17,13 +18,15 @@ import (
 
 type PaymentHandler struct {
 	Store              *payment.Store
+	EventBus           *eventbus.InMemoryBus
 	RazorpayService    *payment.RazorpayService
 	RazorpayWebhookSec string
 }
 
-func NewPaymentHandler(store *payment.Store, rzp *payment.RazorpayService, webhookSec string) *PaymentHandler {
+func NewPaymentHandler(store *payment.Store, eventBus *eventbus.InMemoryBus, rzp *payment.RazorpayService, webhookSec string) *PaymentHandler {
 	return &PaymentHandler{
 		Store:              store,
+		EventBus:           eventBus,
 		RazorpayService:    rzp,
 		RazorpayWebhookSec: webhookSec,
 	}
@@ -117,6 +120,12 @@ func (h *PaymentHandler) HandleProcessUserPayment(w http.ResponseWriter, r *http
 		return
 	}
 
+	h.EventBus.PublishEvent(eventbus.ChannelPaymentCompleted, eventbus.PaymentCompletedPayload{
+		PaymentID: req.PaymentID, RideID: pmt.RideID,
+		UserID: pmt.UserID, DriverID: pmt.PartnerID,
+		Amount: pmt.ChargedAmount, Mode: "online",
+	})
+
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Payment processed successfully"})
 }
 
@@ -163,6 +172,12 @@ func (h *PaymentHandler) HandleProcessDriverPayment(w http.ResponseWriter, r *ht
 		http.Error(w, "Failed to mark payment as paid", http.StatusInternalServerError)
 		return
 	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelPaymentCompleted, eventbus.PaymentCompletedPayload{
+		PaymentID: objID.Hex(), RideID: pmt.RideID,
+		UserID: pmt.UserID, DriverID: pmt.PartnerID,
+		Amount: pmt.ChargedAmount, Mode: "cash",
+	})
 
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Payment processed successfully"})
 }
@@ -262,6 +277,12 @@ func (h *PaymentHandler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Re
 		http.Error(w, "Failed to update payment", http.StatusInternalServerError)
 		return
 	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelPaymentCompleted, eventbus.PaymentCompletedPayload{
+		PaymentID: pmt.ID.Hex(), RideID: pmt.RideID,
+		UserID: pmt.UserID, DriverID: pmt.PartnerID,
+		Amount: pmt.ChargedAmount, Mode: "online",
+	})
 
 	log.Printf("[PaymentWebhook] Payment %s marked paid via Razorpay webhook (order: %s)", pmt.ID.Hex(), event.Payload.Payment.Entity.OrderID)
 	w.WriteHeader(http.StatusOK)

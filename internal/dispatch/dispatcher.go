@@ -2,14 +2,12 @@ package dispatch
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"sync"
 	"time"
 
-	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/metrics"
-	"ambigo-backend/internal/notification"
 	"ambigo-backend/internal/ride"
 	"ambigo-backend/internal/websocket"
 )
@@ -17,22 +15,20 @@ import (
 type Dispatcher struct {
 	Matcher   *Matcher
 	RideStore *ride.Store
-	WSManager *websocket.Manager
-	AuthStore *auth.Store
-	FCMClient *notification.FCMClient
+	EventBus  *eventbus.InMemoryBus
+	WSManager *websocket.Manager // kept only for DeclineHandler callback
 
 	acceptChannels  map[string]chan string
 	declineChannels map[string]chan string
 	mu              sync.RWMutex
 }
 
-func NewDispatcher(matcher *Matcher, rideStore *ride.Store, wsManager *websocket.Manager, authStore *auth.Store, fcmClient *notification.FCMClient) *Dispatcher {
+func NewDispatcher(matcher *Matcher, rideStore *ride.Store, eventBus *eventbus.InMemoryBus, wsManager *websocket.Manager) *Dispatcher {
 	d := &Dispatcher{
 		Matcher:         matcher,
 		RideStore:       rideStore,
+		EventBus:        eventBus,
 		WSManager:       wsManager,
-		AuthStore:       authStore,
-		FCMClient:       fcmClient,
 		acceptChannels:  make(map[string]chan string),
 		declineChannels: make(map[string]chan string),
 	}
@@ -74,6 +70,45 @@ func (d *Dispatcher) RequestRide(r *ride.Ride) error {
 	d.declineChannels[rideID] = make(chan string)
 	d.mu.Unlock()
 
+	// Publish ride requested event (triggers metrics, analytics, etc.)
+	pickupLng, pickupLat := r.Pickup.Coordinates[0], r.Pickup.Coordinates[1]
+	dropoffLng, dropoffLat := r.Drop.Coordinates[0], r.Drop.Coordinates[1]
+	ambTypeID := ""
+	if r.AmbTypeID != nil {
+		ambTypeID = *r.AmbTypeID
+	}
+	hospitalID := ""
+	if r.HospitalID != nil {
+		hospitalID = *r.HospitalID
+	}
+	fare := 0.0
+	driverShare := 0.0
+	distance := 0.0
+	if r.Fare != nil {
+		fare = r.Fare.Total
+		driverShare = r.Fare.DriverShare
+	}
+	if r.Route != nil {
+		distance = r.Route.DistanceKm
+	}
+	d.EventBus.PublishEvent(eventbus.ChannelRideRequested, eventbus.RideRequestedPayload{
+		RideID:        rideID,
+		UserID:        r.UserID,
+		PickupLat:     pickupLat,
+		PickupLng:     pickupLng,
+		PickupAddress: r.PickupAddress,
+		DropoffLat:    dropoffLat,
+		DropoffLng:    dropoffLng,
+		DropAddress:   r.DropAddress,
+		AmbTypeID:     ambTypeID,
+		HospitalID:    hospitalID,
+		PaymentMode:   r.PaymentMode,
+		IsSOS:         r.EmergencyPriority > 0,
+		Fare:          fare,
+		DriverShare:   driverShare,
+		DistanceKm:    distance,
+	})
+
 	go d.startMatchingLoop(r)
 
 	return nil
@@ -95,17 +130,15 @@ func (d *Dispatcher) HandleDriverAccept(ctx context.Context, rideID string, driv
 		ch <- driverID
 	}
 
-	// 3. Notify the user via WebSockets
+	// 3. Publish accepted event (subscribers handle WS, metrics, etc.)
 	rideData, _ := d.RideStore.GetRideByID(ctx, rideID)
-	d.WSManager.SetActiveRide(driverID, rideID)
 	if rideData != nil {
-		payload := map[string]string{
-			"ride_id":   rideID,
-			"driver_id": driverID,
-			"status":    string(ride.StatusAssigned),
-		}
-		d.WSManager.SendToClient("user", rideData.UserID, websocket.EventRideUpdate, payload)
-		d.WSManager.SendToRideWatchers(rideID, websocket.EventRideUpdate, payload)
+		d.EventBus.PublishEvent(eventbus.ChannelRideAccepted, eventbus.RideAcceptedPayload{
+			RideID:   rideID,
+			DriverID: driverID,
+			UserID:   rideData.UserID,
+			Status:   string(ride.StatusAssigned),
+		})
 	}
 
 	return nil
@@ -118,41 +151,6 @@ func (d *Dispatcher) HandleDriverDecline(ctx context.Context, rideID, driverID s
 	d.mu.RUnlock()
 	if exists {
 		ch <- driverID
-	}
-}
-
-// sendFCMToDriver looks up the driver's FCM token and fires a push notification.
-// For SOS rides, the payload includes "is_sos":"true" so the native Android overlay activates.
-func (d *Dispatcher) sendFCMToDriver(driverID string, payload map[string]interface{}) {
-	if d.FCMClient == nil || d.AuthStore == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	token, err := d.AuthStore.GetDriverFCMToken(ctx, driverID)
-	if err != nil {
-		log.Printf("[Dispatcher] Failed to get FCM token for driver %s: %v", driverID, err)
-		return
-	}
-	if token == nil || *token == "" {
-		return
-	}
-
-	data := make(map[string]string)
-	for k, v := range payload {
-		data[k] = fmt.Sprintf("%v", v)
-	}
-
-	if payload["is_sos"] == true {
-		data["title"] = "EMERGENCY ALERT"
-	} else {
-		data["title"] = "New Ride Request"
-	}
-	data["body"] = fmt.Sprintf("Pickup: %v", payload["pickup_address"])
-
-	if err := d.FCMClient.SendDataMessage(ctx, *token, data); err != nil {
-		log.Printf("[Dispatcher] FCM push failed for driver %s: %v", driverID, err)
 	}
 }
 
@@ -175,7 +173,6 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride) {
 	}()
 
 	pickupLng, pickupLat := r.Pickup.Coordinates[0], r.Pickup.Coordinates[1]
-	dropoffLng, dropoffLat := r.Drop.Coordinates[0], r.Drop.Coordinates[1]
 
 	ambTypeID := ""
 	if r.AmbTypeID != nil {
@@ -185,8 +182,10 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride) {
 	if err != nil || len(candidates) == 0 {
 		log.Printf("[Dispatcher] No drivers found for Ride %s. Cancelling.", rideIDStr)
 		d.RideStore.UpdateRideStatus(context.Background(), rideIDStr, ride.StatusSearching, ride.StatusCancelled)
-		d.WSManager.SendToClient("user", r.UserID, websocket.EventError, websocket.ErrorPayload{
-			Message: "No drivers available. Please try again later.",
+		d.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
+			RideID: rideIDStr,
+			Reason: "no_drivers",
+			UserID: r.UserID,
 		})
 		return
 	}
@@ -204,42 +203,18 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride) {
 			fareVal = r.Fare.Total
 			driverShareVal = r.Fare.DriverShare
 		}
-		
-		tripDistance := 0.0
-		if r.Route != nil {
-			tripDistance = r.Route.DistanceKm
-		}
 
-		payload := map[string]interface{}{
-			"ride_id":         rideIDStr,
-			"_id":             rideIDStr,
-			"user_id":         r.UserID,
-			"amb_type_id":     r.AmbTypeID,
-			"hospital_id":     r.HospitalID,
-			"pickup":          r.Pickup,
-			"pickup_lat":      pickupLat,
-			"pickup_lng":      pickupLng,
-			"pickup_address":  r.PickupAddress,
-			"drop":            r.Drop,
-			"dropoff_lat":     dropoffLat,
-			"dropoff_lng":     dropoffLng,
-			"drop_address":    r.DropAddress,
-			"distance_km":     tripDistance,          // Used by Driver App (trip distance)
-			"distance":        tripDistance,          // Used by Native Android Overlay (fallback for trip distance)
-			"pickup_distance": candidate.DistanceKm,  // Used by Driver App (pickup distance)
-			"eta_seconds":     candidate.ETASeconds,
-			"fare":            fareVal,               // Used by some V1 legacy paths
-			"cost":            driverShareVal,        // Used by Native Android Overlay for Estimated Fare
-			"payment_mode":    r.PaymentMode,
-			"is_sos":          r.EmergencyPriority > 0,
-			"time":            r.Time,
-			"created_at":      r.Time.CreatedAt,
-		}
-		log.Printf("[Dispatcher] Ride %s → Driver %s | cost=%.2f fare=%.2f distance=%.3f",
-			rideIDStr, candidate.DriverID, driverShareVal, fareVal, tripDistance)
-		d.WSManager.SendToClient("driver", candidate.DriverID, websocket.EventRideRequested, payload)
 		r.DispatchMetadata.OffersSent++
-		d.sendFCMToDriver(candidate.DriverID, payload)
+
+		d.EventBus.PublishEvent(eventbus.ChannelRideDriverOffered, eventbus.RideDriverOfferedPayload{
+			RideID:      rideIDStr,
+			DriverID:    candidate.DriverID,
+			ETASeconds:  candidate.ETASeconds,
+			DistanceKm:  candidate.DistanceKm,
+			Fare:        fareVal,
+			DriverShare: driverShareVal,
+			IsSOS:       r.EmergencyPriority > 0,
+		})
 
 		d.mu.RLock()
 		acceptCh := d.acceptChannels[rideIDStr]
@@ -272,7 +247,9 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride) {
 	log.Printf("[Dispatcher] Ride %s: All candidates exhausted. Cancelling.", rideIDStr)
 	d.RideStore.UpdateRideStatus(context.Background(), rideIDStr, ride.StatusSearching, ride.StatusCancelled)
 
-	d.WSManager.SendToClient("user", r.UserID, websocket.EventError, websocket.ErrorPayload{
-		Message: "All nearby drivers are busy. Please try again.",
+	d.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
+		RideID: rideIDStr,
+		Reason: "all_drivers_exhausted",
+		UserID: r.UserID,
 	})
 }

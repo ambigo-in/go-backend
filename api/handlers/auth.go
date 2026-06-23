@@ -5,18 +5,20 @@ import (
 	"net/http"
 
 	"ambigo-backend/internal/auth"
-	"ambigo-backend/internal/metrics"
+	"ambigo-backend/internal/eventbus"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type AuthHandler struct {
 	AuthStore *auth.Store
+	EventBus  *eventbus.InMemoryBus
 	JWTSecret string
 }
 
-func NewAuthHandler(authStore *auth.Store, jwtSecret string) *AuthHandler {
+func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string) *AuthHandler {
 	return &AuthHandler{
 		AuthStore: authStore,
+		EventBus:  eventBus,
 		JWTSecret: jwtSecret,
 	}
 }
@@ -43,7 +45,9 @@ func (h *AuthHandler) HandleUserRequestOTP(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
 		return
 	}
-	metrics.OtpRequestsTotal.Inc()
+	h.EventBus.PublishEvent(eventbus.ChannelAuthOTPRequested, eventbus.AuthOTPRequestedPayload{
+		Mobile: payload.Mobile, Role: "user",
+	})
 
 	// Send the SMS
 	err = auth.SendSMS(payload.Mobile, otp, payload.AppSignature)
@@ -117,6 +121,9 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 			http.Error(w, "Failed to create user", http.StatusInternalServerError)
 			return
 		}
+		h.EventBus.PublishEvent(eventbus.ChannelAuthUserRegistered, eventbus.AuthUserRegisteredPayload{
+			UserID: user.ID.Hex(), Mobile: payload.Mobile, Name: payload.Name,
+		})
 	}
 
 	// 3. Generate JWT Token
@@ -128,6 +135,10 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 
 	// 4. Update Token in DB
 	h.AuthStore.UpdateUserJWT(r.Context(), user.ID, token)
+
+	h.EventBus.PublishEvent(eventbus.ChannelAuthUserLoggedIn, eventbus.AuthUserLoggedInPayload{
+		UserID: user.ID.Hex(), Mobile: payload.Mobile,
+	})
 
 	// 5. Return Token
 	w.Header().Set("Content-Type", "application/json")
@@ -153,7 +164,9 @@ func (h *AuthHandler) HandleDriverRequestOTP(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
 		return
 	}
-	metrics.OtpRequestsTotal.Inc()
+	h.EventBus.PublishEvent(eventbus.ChannelAuthOTPRequested, eventbus.AuthOTPRequestedPayload{
+		Mobile: payload.Mobile, Role: "driver",
+	})
 
 	err = auth.SendSMS(payload.Mobile, otp, payload.AppSignature)
 	if err != nil {
@@ -229,6 +242,9 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 				http.Error(w, "Failed to create driver", http.StatusInternalServerError)
 				return
 			}
+			h.EventBus.PublishEvent(eventbus.ChannelAuthDriverCreated, eventbus.AuthDriverCreatedPayload{
+				DriverID: unverifiedDriver.ID.Hex(), Mobile: payload.Mobile, Name: payload.Name,
+			})
 		}
 		driverID = unverifiedDriver.ID
 	}
@@ -243,6 +259,10 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 	} else {
 		h.AuthStore.UpdateUnverifiedDriverJWT(r.Context(), driverID, token)
 	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelAuthDriverLoggedIn, eventbus.AuthDriverLoggedInPayload{
+		DriverID: driverID.Hex(), Mobile: payload.Mobile, Role: role,
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{

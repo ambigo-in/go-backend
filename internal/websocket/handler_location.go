@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+
+	"ambigo-backend/internal/eventbus"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -42,12 +44,14 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 	m.mu.RLock()
 	rideID := m.activeDriverRide[client.ID]
 	m.mu.RUnlock()
-	if rideID != "" {
-		m.SendToRideWatchers(rideID, EventLocationUpdate, map[string]float64{
-			"lat":       update.Lat,
-			"lng":       update.Lng,
-			"latitude":  update.Lat,
-			"longitude": update.Lng,
+
+	// Publish driver location event (subscriber handles onward relay to ride watchers)
+	if m.EventBus != nil {
+		m.EventBus.PublishEvent(eventbus.ChannelDriverLocationUpdate, eventbus.DriverLocationUpdatePayload{
+			DriverID: client.ID,
+			Lat:      update.Lat,
+			Lng:      update.Lng,
+			RideID:   rideID,
 		})
 	}
 }

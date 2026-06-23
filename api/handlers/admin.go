@@ -6,6 +6,7 @@ import (
 
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/translation"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
@@ -14,15 +15,15 @@ import (
 type AdminHandler struct {
 	Store         *admin.Store
 	AuthStore     *auth.Store
-	CounterStore  *admin.CounterStore
+	EventBus      *eventbus.InMemoryBus
 	HospitalStore *admin.HospitalStore
 }
 
-func NewAdminHandler(store *admin.Store, authStore *auth.Store, cStore *admin.CounterStore, hStore *admin.HospitalStore) *AdminHandler {
+func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore) *AdminHandler {
 	return &AdminHandler{
 		Store:         store,
 		AuthStore:     authStore,
-		CounterStore:  cStore,
+		EventBus:      eventBus,
 		HospitalStore: hStore,
 	}
 }
@@ -68,9 +69,10 @@ func (h *AdminHandler) HandleCreateAmbulanceType(w http.ResponseWriter, r *http.
 		http.Error(w, "Failed to create: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
-	// Broadcast invalidation for cache
-	h.CounterStore.IncrementCounter(r.Context(), "ambulance_type")
+
+	h.EventBus.PublishEvent(eventbus.ChannelAdminAmbTypeCreated, eventbus.AdminAmbTypePayload{
+		AmbTypeID: amb.ID.Hex(), Name: amb.Name,
+	})
 
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(map[string]interface{}{
@@ -103,8 +105,10 @@ func (h *AdminHandler) HandleDeleteAmbulanceType(w http.ResponseWriter, r *http.
 		http.Error(w, "Failed to delete: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	
-	h.CounterStore.IncrementCounter(r.Context(), "ambulance_type")
+
+	h.EventBus.PublishEvent(eventbus.ChannelAdminAmbTypeDeleted, eventbus.AdminAmbTypePayload{
+		AmbTypeID: idStr,
+	})
 
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Deleted"})
 }
@@ -123,7 +127,9 @@ func (h *AdminHandler) HandleApproveDriver(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// NOTE: We would also trigger send_fcm_notification(driver.FCMToken, "Welcome!") here
+	h.EventBus.PublishEvent(eventbus.ChannelAuthDriverApproved, eventbus.AuthDriverApprovedPayload{
+		DriverID: driver.ID.Hex(), Name: driver.Name, Mobile: driver.Mobile,
+	})
 
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver Approved"})
 }
@@ -187,7 +193,9 @@ func (h *AdminHandler) HandleAddHospital(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	h.CounterStore.IncrementCounter(r.Context(), "hospitals")
+	h.EventBus.PublishEvent(eventbus.ChannelAdminHospitalAdded, eventbus.AdminHospitalPayload{
+		HospitalID: hospital.ID.Hex(), Name: hospital.Name["en_US"],
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Hospital added successfully"})
 }
 
@@ -228,7 +236,9 @@ func (h *AdminHandler) HandleUpdateHospital(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	h.CounterStore.IncrementCounter(r.Context(), "hospitals")
+	h.EventBus.PublishEvent(eventbus.ChannelAdminHospitalUpdated, eventbus.AdminHospitalPayload{
+		HospitalID: req.ID,
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Hospital updated successfully"})
 }
 
@@ -252,7 +262,9 @@ func (h *AdminHandler) HandleDeleteHospital(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	h.CounterStore.IncrementCounter(r.Context(), "hospitals")
+	h.EventBus.PublishEvent(eventbus.ChannelAdminHospitalDeleted, eventbus.AdminHospitalPayload{
+		HospitalID: req.HospitalID,
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Hospital deleted successfully"})
 }
 

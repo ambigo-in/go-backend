@@ -5,7 +5,7 @@ import (
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/dispatch"
-	"ambigo-backend/internal/metrics"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/payment"
 	"ambigo-backend/internal/pricing"
 	"ambigo-backend/internal/ride"
@@ -22,6 +22,7 @@ import (
 
 type RideHandler struct {
 	Dispatcher      *dispatch.Dispatcher
+	EventBus        *eventbus.InMemoryBus
 	PaymentStore    *payment.Store
 	RazorpayService *payment.RazorpayService
 	AuthStore       *auth.Store
@@ -31,9 +32,10 @@ type RideHandler struct {
 	WalletStore     *payment.WalletStore
 }
 
-func NewRideHandler(dispatcher *dispatch.Dispatcher, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore) *RideHandler {
+func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemoryBus, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore) *RideHandler {
 	return &RideHandler{
 		Dispatcher:      dispatcher,
+		EventBus:        eventBus,
 		PaymentStore:    paymentStore,
 		RazorpayService: rzp,
 		AuthStore:       authStore,
@@ -99,8 +101,6 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			Coordinates: []float64{req.DropoffLng, req.DropoffLat},
 		},
 	}
-
-	metrics.RideRequestsTotal.Inc()
 
 	// Compute distance server-side using Google Routes API
 	route, err := h.RouteClient.CalculateETA(r.Context(), req.PickupLat, req.PickupLng, req.DropoffLat, req.DropoffLng)
@@ -195,8 +195,6 @@ func (h *RideHandler) HandleDriverAccept(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	metrics.RidesAssignedTotal.Inc()
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{
@@ -227,7 +225,9 @@ func (h *RideHandler) HandleArrive(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to arrive at pickup: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusArrived)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideArrived, eventbus.RideStatusChangedPayload{
+		RideID: rideID, Status: string(ride.StatusArrived),
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver Arrived"})
 }
 
@@ -278,7 +278,9 @@ func (h *RideHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to start ride: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusInProgress)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideStarted, eventbus.RideStatusChangedPayload{
+		RideID: rideID, Status: string(ride.StatusInProgress),
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Ride Started"})
 }
 
@@ -380,10 +382,21 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.PaymentStore.CreatePayment(r.Context(), pmt)
-	metrics.RidesCompletedTotal.Inc()
 
-	h.Dispatcher.WSManager.ClearActiveRide(driverID)
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusCompleted)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideCompleted, eventbus.RideCompletedPayload{
+		RideID:      rideID,
+		DriverID:    driverID,
+		UserID:      rideData.UserID,
+		PaymentMode: req.PaymentMode,
+		FinalAmount: finalAmount,
+		DriverShare: func() float64 {
+			if rideData.Fare != nil {
+				return rideData.Fare.DriverShare
+			}
+			return 0
+		}(),
+		DropAddress: req.DropAddress,
+	})
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"detail":            "Ride Completed",
@@ -417,11 +430,17 @@ func (h *RideHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{"detail": "Failed to cancel ride: " + err.Error()})
 		return
 	}
-	if rideData.DriverID != nil {
-		h.Dispatcher.WSManager.ClearActiveRide(*rideData.DriverID)
-	}
-	metrics.RidesCancelledTotal.Inc()
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusCancelled)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
+		RideID:   rideID,
+		Reason:   "user_cancelled",
+		UserID:   rideData.UserID,
+		DriverID: func() string {
+			if rideData.DriverID != nil {
+				return *rideData.DriverID
+			}
+			return ""
+		}(),
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Ride Cancelled"})
 }
 
