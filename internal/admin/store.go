@@ -76,3 +76,15 @@ func (s *Store) FindAdminByUsername(ctx context.Context, username string) (*Admi
 	}
 	return &admin, nil
 }
+
+func (s *Store) FindAdminByMobile(ctx context.Context, mobile string) (*Admin, error) {
+	var admin Admin
+	err := s.admins.FindOne(ctx, bson.M{"mobile": mobile}).Decode(&admin)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &admin, nil
+}

@@ -17,12 +17,14 @@ import (
 // RouteClient handles communication with Google Routes API
 type RouteClient struct {
 	APIKey string
+	APIURL string
 	Client *http.Client
 }
 
-func NewRouteClient(apiKey string) *RouteClient {
+func NewRouteClient(apiKey, apiURL string) *RouteClient {
 	return &RouteClient{
 		APIKey: apiKey,
+		APIURL: apiURL,
 		Client: &http.Client{
 			Timeout: 5 * time.Second,
 			Transport: &http.Transport{
@@ -95,7 +97,7 @@ func (rc *RouteClient) CalculateETA(ctx context.Context, originLat, originLng, d
 			return err
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "POST", "https://routes.googleapis.com/directions/v2:computeRoutes", bytes.NewBuffer(jsonData))
+		req, err := http.NewRequestWithContext(ctx, "POST", rc.APIURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			return err
 		}

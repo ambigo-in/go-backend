@@ -268,14 +268,23 @@ func (h *RideHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify OTP
-	otp := req.OTP
-	if otp == "" {
-		otp = req.UserOTP
+	// Verify OTP if ambulance type requires it
+	otpRequired := true
+	if rideData.AmbTypeID != nil {
+		ambType, err := h.AdminStore.GetAmbulanceTypeByID(r.Context(), *rideData.AmbTypeID)
+		if err == nil && ambType != nil {
+			otpRequired = ambType.OTPRequired
+		}
 	}
-	if otp == "" || rideData.StartOTP != otp {
-		response.Error(w, "Invalid OTP", http.StatusBadRequest)
-		return
+	if otpRequired {
+		otp := req.OTP
+		if otp == "" {
+			otp = req.UserOTP
+		}
+		if otp == "" || rideData.StartOTP != otp {
+			response.Error(w, "Invalid OTP", http.StatusBadRequest)
+			return
+		}
 	}
 
 	if rideData.Status == ride.StatusAssigned {

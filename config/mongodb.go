@@ -66,10 +66,10 @@ func EnsureIndexes(client *mongo.Client) error {
 		return err
 	}
 
-	// Admin — unique index on username
+	// Admin — sparse unique index on username (admins can also log in via mobile)
 	if _, err := users.Collection("admin").Indexes().CreateOne(ctx, mongo.IndexModel{
 		Keys:    bson.D{{"username", 1}},
-		Options: options.Index().SetUnique(true),
+		Options: options.Index().SetUnique(true).SetSparse(true),
 	}); err != nil {
 		return err
 	}

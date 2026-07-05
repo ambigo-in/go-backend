@@ -12,17 +12,19 @@ import (
 )
 
 type ZwitchService struct {
-	KeyID     string
-	Secret    string
-	AccountID string
-	Client    *http.Client
+	KeyID       string
+	Secret      string
+	AccountID   string
+	APIBaseURL  string
+	Client      *http.Client
 }
 
-func NewZwitchService(key, secret, accountID string) *ZwitchService {
+func NewZwitchService(key, secret, accountID, apiBaseURL string) *ZwitchService {
 	return &ZwitchService{
-		KeyID:     key,
-		Secret:    secret,
-		AccountID: accountID,
+		KeyID:      key,
+		Secret:     secret,
+		AccountID:  accountID,
+		APIBaseURL: apiBaseURL,
 		Client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -35,7 +37,7 @@ func (s *ZwitchService) setHeaders(req *http.Request) {
 }
 
 func (s *ZwitchService) VerifyBankAccount(acc *auth.WalletDetails, referenceID string) (string, error) {
-	url := "https://api.zwitch.io/v1/verifications/bank-account"
+	url := s.APIBaseURL + "/verifications/bank-account"
 	payload := map[string]interface{}{
 		"force_penny_drop":        false,
 		"force_penny_drop_amount": 1,
@@ -67,7 +69,7 @@ func (s *ZwitchService) VerifyBankAccount(acc *auth.WalletDetails, referenceID s
 }
 
 func (s *ZwitchService) CreateBeneficiary(acc *auth.WalletDetails, driverID string) (string, error) {
-	url := fmt.Sprintf("https://api.zwitch.io/v1/accounts/%s/beneficiaries", s.AccountID)
+	url := fmt.Sprintf("%s/accounts/%s/beneficiaries", s.APIBaseURL, s.AccountID)
 	payload := map[string]interface{}{
 		"type":                   "account_number",
 		"name_of_account_holder": acc.BenfName,
@@ -101,7 +103,7 @@ func (s *ZwitchService) CreateBeneficiary(acc *auth.WalletDetails, driverID stri
 }
 
 func (s *ZwitchService) UpdateBeneficiaryName(acc *auth.WalletDetails) error {
-	url := fmt.Sprintf("https://api.zwitch.io/v1/accounts/beneficiaries/%s", acc.BenfID)
+	url := fmt.Sprintf("%s/accounts/beneficiaries/%s", s.APIBaseURL, acc.BenfID)
 	payload := map[string]interface{}{
 		"name_of_account_holder": acc.BenfName,
 	}
@@ -124,7 +126,7 @@ func (s *ZwitchService) UpdateBeneficiaryName(acc *auth.WalletDetails) error {
 }
 
 func (s *ZwitchService) DeleteBeneficiary(benfID string) error {
-	url := fmt.Sprintf("https://api.zwitch.io/v1/accounts/beneficiaries/%s", benfID)
+	url := fmt.Sprintf("%s/accounts/beneficiaries/%s", s.APIBaseURL, benfID)
 	req, _ := http.NewRequest("DELETE", url, nil)
 	s.setHeaders(req)
 
@@ -141,7 +143,7 @@ func (s *ZwitchService) DeleteBeneficiary(benfID string) error {
 }
 
 func (s *ZwitchService) CreateTransfer(acc *auth.WalletDetails, amount float64, referenceID string) (map[string]interface{}, error) {
-	url := "https://api.zwitch.io/v1/transfers"
+	url := s.APIBaseURL + "/transfers"
 	payload := map[string]interface{}{
 		"type":                  "account_number",
 		"currency_code":         "inr",

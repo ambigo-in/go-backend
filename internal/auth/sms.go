@@ -6,11 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 )
-
-const SMSHeader = "AMBHPL"
 
 var smsClient = &http.Client{
 	Timeout: 10 * time.Second,
@@ -20,18 +17,24 @@ var smsClient = &http.Client{
 	},
 }
 
-// SendSMS calls the SMSCountry API to send an OTP
-func SendSMS(number string, otp string, appSignature string) error {
-	authKey := os.Getenv("SMS_COUNTRY_KEY")
-	authToken := os.Getenv("SMS_COUNTRY_TOKEN")
+// SMSCountryConfig holds configuration for SMSCountry API
+type SMSCountryConfig struct {
+	APIKey     string
+	APIToken   string
+	APIBaseURL string
+	SenderID   string
+	CC         string // country code prefix
+}
 
-	if authKey == "" || authToken == "" {
+// SendSMS calls the SMSCountry API to send an OTP
+func SendSMS(cfg SMSCountryConfig, number string, otp string, appSignature string) error {
+	if cfg.APIKey == "" || cfg.APIToken == "" {
 		return fmt.Errorf("SMS_COUNTRY_KEY or SMS_COUNTRY_TOKEN is not set in environment")
 	}
 
-	credentials := fmt.Sprintf("%s:%s", authKey, authToken)
+	credentials := fmt.Sprintf("%s:%s", cfg.APIKey, cfg.APIToken)
 	encodedCredentials := base64.StdEncoding.EncodeToString([]byte(credentials))
-	url := fmt.Sprintf("https://restapi.smscountry.com/v0.1/Accounts/%s/SMSes/", authKey)
+	url := fmt.Sprintf(cfg.APIBaseURL, cfg.APIKey)
 
 	// Build the message exactly like V1
 	msgContent := fmt.Sprintf("Your Ambigo verification code is: %s. Please do not share it with anyone else.", otp)
@@ -40,9 +43,9 @@ func SendSMS(number string, otp string, appSignature string) error {
 	}
 
 	payload := map[string]string{
-		"Number":   "91" + number,
+		"Number":   cfg.CC + number,
 		"Text":     msgContent,
-		"SenderId": SMSHeader,
+		"SenderId": cfg.SenderID,
 	}
 
 	jsonPayload, err := json.Marshal(payload)

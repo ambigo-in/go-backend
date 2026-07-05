@@ -14,14 +14,32 @@ type AppConfig struct {
 	JWTValidityMs     int
 	APIKey            string
 	GoogleMapsAPIKey  string
+
+	// SMS Country (OTP)
+	SMSAPIBaseURL string
+	SMSSenderID   string
+	SMSCC         string // country code prefix
+
+	// Razorpay
 	RazorpayKeyID          string
 	RazorpayKeySecret      string
 	RazorpayWebhookSecret string
-	CloudshopeToken   string
-	CloudshopeNumber  string
-	ZwitchKey         string
-	ZwitchSecret      string
-	ZwitchAccountID   string
+
+	// Zwitch (Bank Payouts)
+	ZwitchKey       string
+	ZwitchSecret    string
+	ZwitchAccountID string
+	ZwitchAPIBaseURL string
+
+	// Cloudshope (Call Masking)
+	CloudshopeToken      string
+	CloudshopeNumber     string
+	CloudshopeAPIBaseURL string
+
+	// Google APIs
+	GoogleRoutesAPIURL     string
+	GoogleTranslateAPIURL  string
+
 	FirebaseCredentialsPath string
 	Port              string
 }
@@ -45,14 +63,27 @@ func LoadConfig() *AppConfig {
 		JWTAlgorithm:      os.Getenv("JWT_ALGORITHM"),
 		APIKey:            os.Getenv("API_KEY"),
 		GoogleMapsAPIKey:  os.Getenv("GOOGLE_MAPS_API_KEY"),
+
+		SMSAPIBaseURL:     envOrDefault("SMS_API_BASE_URL", "https://restapi.smscountry.com/v0.1/Accounts/%s/SMSes/"),
+		SMSSenderID:       envOrDefault("SMS_SENDER_ID", "AMBHPL"),
+		SMSCC:             envOrDefault("SMS_COUNTRY_CODE", "91"),
+
 		RazorpayKeyID:          os.Getenv("RAZORPAY_KEY_ID"),
 		RazorpayKeySecret:      os.Getenv("RAZORPAY_KEY_SECRET"),
 		RazorpayWebhookSecret: os.Getenv("RAZORPAY_WEBHOOK_SECRET"),
-		CloudshopeToken:   os.Getenv("CLOUDSHOPE_TOKEN"),
-		CloudshopeNumber:  os.Getenv("CLOUDSHOPE_NUMBER"),
+
 		ZwitchKey:         os.Getenv("ZWITCH_KEY"),
 		ZwitchSecret:      os.Getenv("ZWITCH_SECRET"),
 		ZwitchAccountID:   os.Getenv("ZWITCH_ACCOUNT_ID"),
+		ZwitchAPIBaseURL:  envOrDefault("ZWITCH_API_BASE_URL", "https://api.zwitch.io/v1"),
+
+		CloudshopeToken:      os.Getenv("CLOUDSHOPE_TOKEN"),
+		CloudshopeNumber:     os.Getenv("CLOUDSHOPE_NUMBER"),
+		CloudshopeAPIBaseURL: envOrDefault("CLOUDSHOPE_API_BASE_URL", "https://apiv2.cloudshope.com/api/outboundCall"),
+
+		GoogleRoutesAPIURL:    envOrDefault("GOOGLE_ROUTES_API_URL", "https://routes.googleapis.com/directions/v2:computeRoutes"),
+		GoogleTranslateAPIURL: envOrDefault("GOOGLE_TRANSLATE_API_URL", "https://translate.googleapis.com/translate_a/single"),
+
 		FirebaseCredentialsPath: os.Getenv("FIREBASE_CREDENTIALS_PATH"),
 		Port:              port,
 	}
@@ -65,4 +96,11 @@ func LoadConfig() *AppConfig {
 	}
 
 	return cfg
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }

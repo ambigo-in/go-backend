@@ -15,13 +15,15 @@ type AuthHandler struct {
 	AuthStore *auth.Store
 	EventBus  *eventbus.InMemoryBus
 	JWTSecret string
+	SMSCfg    auth.SMSCountryConfig
 }
 
-func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string) *AuthHandler {
+func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string, smsCfg auth.SMSCountryConfig) *AuthHandler {
 	return &AuthHandler{
 		AuthStore: authStore,
 		EventBus:  eventBus,
 		JWTSecret: jwtSecret,
+		SMSCfg:    smsCfg,
 	}
 }
 
@@ -57,9 +59,8 @@ func (h *AuthHandler) HandleUserRequestOTP(w http.ResponseWriter, r *http.Reques
 	})
 
 	// Send the SMS
-	err = auth.SendSMS(payload.Mobile, otp, payload.AppSignature)
+	err = auth.SendSMS(h.SMSCfg, payload.Mobile, otp, payload.AppSignature)
 	if err != nil {
-		// Log the error but maybe return success in dev mode so we can still test
 		response.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -185,7 +186,7 @@ func (h *AuthHandler) HandleDriverRequestOTP(w http.ResponseWriter, r *http.Requ
 		Mobile: payload.Mobile, Role: "driver", RequestID: reqID,
 	})
 
-	err = auth.SendSMS(payload.Mobile, otp, payload.AppSignature)
+	err = auth.SendSMS(h.SMSCfg, payload.Mobile, otp, payload.AppSignature)
 	if err != nil {
 		response.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
 		return

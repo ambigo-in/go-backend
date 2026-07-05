@@ -10,15 +10,19 @@ import (
 )
 
 type CloudshopeService struct {
-	Token     string
-	CLINumber string
-	Client    *http.Client
+	Token       string
+	CLINumber   string
+	APIURL      string
+	CountryCode string
+	Client      *http.Client
 }
 
-func NewCloudshopeService(token, cliNumber string) *CloudshopeService {
+func NewCloudshopeService(token, cliNumber, apiURL, countryCode string) *CloudshopeService {
 	return &CloudshopeService{
-		Token:     token,
-		CLINumber: cliNumber,
+		Token:       token,
+		CLINumber:   cliNumber,
+		APIURL:      apiURL,
+		CountryCode: countryCode,
 		Client: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -26,7 +30,7 @@ func NewCloudshopeService(token, cliNumber string) *CloudshopeService {
 }
 
 func (s *CloudshopeService) InitiateCallMasking(fromNumber, toNumber string) (string, error) {
-	url := "https://apiv2.cloudshope.com/api/outboundCall"
+	url := s.APIURL
 
 	payload := map[string]string{
 		"from_number":   fromNumber,
@@ -58,5 +62,5 @@ func (s *CloudshopeService) InitiateCallMasking(fromNumber, toNumber string) (st
 	}
 
 	// Returns the CLI Number in International format so the caller knows who to expect a call from
-	return fmt.Sprintf("+91%s", s.CLINumber), nil
+	return fmt.Sprintf("+%s%s", s.CountryCode, s.CLINumber), nil
 }

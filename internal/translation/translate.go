@@ -12,6 +12,9 @@ import (
 // Map maps a target locale like "hi_IN" to the translation string
 type Map map[string]string
 
+// TranslateAPIURL is the base URL for Google Translate (set from config at startup)
+var TranslateAPIURL = "https://translate.googleapis.com/translate_a/single"
+
 var languages = map[string]string{
 	"en_US": "en",
 	"hi_IN": "hi",
@@ -61,7 +64,7 @@ func fetchTranslation(client *http.Client, text, code string) string {
 	}
 
 	encodedText := url.QueryEscape(text)
-	urlStr := fmt.Sprintf("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=%s&dt=t&q=%s", code, encodedText)
+	urlStr := fmt.Sprintf("%s?client=gtx&sl=auto&tl=%s&dt=t&q=%s", TranslateAPIURL, code, encodedText)
 
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {

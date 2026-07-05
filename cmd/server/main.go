@@ -24,6 +24,7 @@ import (
 	"ambigo-backend/internal/payment"
 	"ambigo-backend/internal/ride"
 	"ambigo-backend/internal/telephony"
+	"ambigo-backend/internal/translation"
 	"ambigo-backend/internal/websocket"
 
 	"github.com/joho/godotenv"
@@ -89,19 +90,28 @@ func main() {
 	wsManager := websocket.NewManager(locationStore, authStore, eventBus)
 	go wsManager.Run() // Start WebSocket Hub
 	
-	routeClient := dispatch.NewRouteClient(appConfig.GoogleMapsAPIKey)
+	routeClient := dispatch.NewRouteClient(appConfig.GoogleMapsAPIKey, appConfig.GoogleRoutesAPIURL)
 	fcmClient := notification.NewFCMClient(context.Background(), appConfig.FirebaseCredentialsPath)
 	matcher := dispatch.NewMatcher(locationStore, routeClient)
 	dispatcher := dispatch.NewDispatcher(matcher, rideStore, eventBus, wsManager)
 	dispatcher.StartStaleRideCleanup()
-	
+
+	// Set Google Translate API URL (used by package-level var)
+	translation.TranslateAPIURL = appConfig.GoogleTranslateAPIURL
+
 	rzpService := payment.NewRazorpayService(appConfig.RazorpayKeyID, appConfig.RazorpayKeySecret)
-	cloudshopeService := telephony.NewCloudshopeService(appConfig.CloudshopeToken, appConfig.CloudshopeNumber)
-	zwitchService := payment.NewZwitchService(appConfig.ZwitchKey, appConfig.ZwitchSecret, appConfig.ZwitchAccountID)
+	cloudshopeService := telephony.NewCloudshopeService(appConfig.CloudshopeToken, appConfig.CloudshopeNumber, appConfig.CloudshopeAPIBaseURL, appConfig.SMSCC)
+	zwitchService := payment.NewZwitchService(appConfig.ZwitchKey, appConfig.ZwitchSecret, appConfig.ZwitchAccountID, appConfig.ZwitchAPIBaseURL)
 
 	// Initialize Handlers
 	rideHandler := handlers.NewRideHandler(dispatcher, eventBus, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore)
-	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret)
+	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, auth.SMSCountryConfig{
+		APIKey:     os.Getenv("SMS_COUNTRY_KEY"),
+		APIToken:   os.Getenv("SMS_COUNTRY_TOKEN"),
+		APIBaseURL: appConfig.SMSAPIBaseURL,
+		SenderID:   appConfig.SMSSenderID,
+		CC:         appConfig.SMSCC,
+	})
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, appConfig.RazorpayWebhookSecret)
@@ -228,6 +238,8 @@ func main() {
 
 	// Admin Endpoints (Protected)
 	mux.HandleFunc("POST /api/v2/admin/login", adminHandler.HandleAdminLogin)
+	mux.HandleFunc("POST /api/v2/admin/login/mobile", adminHandler.HandleAdminMobileRequestOTP)
+	mux.HandleFunc("POST /api/v2/admin/login/mobile/verify", adminHandler.HandleAdminMobileVerifyOTP)
 	mux.Handle("POST /api/v2/admin/ambulance_types", requireAdmin(http.HandlerFunc(adminHandler.HandleCreateAmbulanceType)))
 	mux.Handle("GET /api/v2/admin/ambulance_types", requireAdmin(http.HandlerFunc(adminHandler.HandleListAmbulanceTypes)))
 	mux.Handle("DELETE /api/v2/admin/ambulance_types/{id}", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteAmbulanceType)))

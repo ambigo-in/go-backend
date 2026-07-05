@@ -8,6 +8,7 @@ import (
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/requestid"
 	"ambigo-backend/internal/translation"
 	"golang.org/x/crypto/bcrypt"
@@ -62,6 +63,90 @@ func (h *AdminHandler) HandleAdminLogin(w http.ResponseWriter, r *http.Request) 
 
 	if err := bcrypt.CompareHashAndPassword([]byte(adminUser.HashedPassword), []byte(req.Password)); err != nil {
 		response.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		return
+	}
+
+	token, err := auth.GenerateJWT(adminUser.ID.Hex(), "admin", h.JWTSecret)
+	if err != nil {
+		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"detail": "Admin Login Successful",
+		"token":  token,
+		"name":   adminUser.Name,
+		"role":   adminUser.Role,
+	})
+}
+
+func (h *AdminHandler) HandleAdminMobileRequestOTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mobile string `json:"mobile" validate:"required,len=10"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
+		return
+	}
+
+	adminUser, err := h.Store.FindAdminByMobile(r.Context(), req.Mobile)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if adminUser == nil {
+		response.Error(w, "Mobile not registered as admin", http.StatusUnauthorized)
+		return
+	}
+	if !adminUser.Active {
+		response.Error(w, "Account deactivated", http.StatusForbidden)
+		return
+	}
+
+	otp, err := h.AuthStore.GenerateAndStoreOTP(r.Context(), req.Mobile)
+	if err != nil {
+		response.Error(w, "Failed to send OTP", http.StatusInternalServerError)
+		return
+	}
+
+	logger.Log.Info().Str("mobile", req.Mobile).Str("otp", otp).Msg("Admin OTP sent")
+	json.NewEncoder(w).Encode(map[string]string{"detail": "OTP sent"})
+}
+
+func (h *AdminHandler) HandleAdminMobileVerifyOTP(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mobile string `json:"mobile" validate:"required,len=10"`
+		OTP    string `json:"otp" validate:"required,len=6"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
+		return
+	}
+
+	valid, err := h.AuthStore.VerifyOTP(r.Context(), req.Mobile, req.OTP)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if !valid {
+		response.Error(w, "Invalid OTP", http.StatusUnauthorized)
+		return
+	}
+
+	adminUser, err := h.Store.FindAdminByMobile(r.Context(), req.Mobile)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if adminUser == nil {
+		response.Error(w, "Admin not found", http.StatusUnauthorized)
 		return
 	}
 
