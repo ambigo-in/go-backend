@@ -1,27 +1,31 @@
 package handlers
 
 import (
-	"ambigo-backend/api/middleware"
-	"ambigo-backend/internal/admin"
-	"ambigo-backend/internal/auth"
-	"ambigo-backend/internal/dispatch"
-	"ambigo-backend/internal/metrics"
-	"ambigo-backend/internal/payment"
-	"ambigo-backend/internal/pricing"
-	"ambigo-backend/internal/ride"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
+
+	"ambigo-backend/api/middleware"
+	"ambigo-backend/api/response"
+	"ambigo-backend/internal/admin"
+	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/dispatch"
+	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/logger"
+	"ambigo-backend/internal/payment"
+	"ambigo-backend/internal/requestid"
+	"ambigo-backend/internal/pricing"
+	"ambigo-backend/internal/ride"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type RideHandler struct {
 	Dispatcher      *dispatch.Dispatcher
+	EventBus        *eventbus.InMemoryBus
 	PaymentStore    *payment.Store
 	RazorpayService *payment.RazorpayService
 	AuthStore       *auth.Store
@@ -31,9 +35,10 @@ type RideHandler struct {
 	WalletStore     *payment.WalletStore
 }
 
-func NewRideHandler(dispatcher *dispatch.Dispatcher, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore) *RideHandler {
+func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemoryBus, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore) *RideHandler {
 	return &RideHandler{
 		Dispatcher:      dispatcher,
+		EventBus:        eventBus,
 		PaymentStore:    paymentStore,
 		RazorpayService: rzp,
 		AuthStore:       authStore,
@@ -45,27 +50,32 @@ func NewRideHandler(dispatcher *dispatch.Dispatcher, paymentStore *payment.Store
 }
 
 func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) {
+	log := logger.Ctx(r.Context())
+
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var req struct {
-		PickupLat     float64 `json:"pickup_lat"`
-		PickupLng     float64 `json:"pickup_lng"`
-		DropoffLat    float64 `json:"dropoff_lat"`
-		DropoffLng    float64 `json:"dropoff_lng"`
-		AmbTypeID     string  `json:"amb_type_id"`
+		PickupLat     float64 `json:"pickup_lat" validate:"required,min=-90,max=90"`
+		PickupLng     float64 `json:"pickup_lng" validate:"required,min=-180,max=180"`
+		DropoffLat    float64 `json:"dropoff_lat" validate:"required,min=-90,max=90"`
+		DropoffLng    float64 `json:"dropoff_lng" validate:"required,min=-180,max=180"`
+		AmbTypeID     string  `json:"amb_type_id" validate:"required"`
 		HospitalID    string  `json:"hospital_id"`
-		PickupAddress string  `json:"pickup_address"`
-		DropAddress   string  `json:"drop_address"`
-		PaymentMode   string  `json:"payment_mode"`
+		PickupAddress string  `json:"pickup_address" validate:"required"`
+		DropAddress   string  `json:"drop_address" validate:"required"`
+		PaymentMode   string  `json:"payment_mode" validate:"omitempty,oneof=cash online"`
 		IsSOS         bool    `json:"is_sos"`
 	}
 
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		response.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
 		return
 	}
 
@@ -100,33 +110,30 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 		},
 	}
 
-	metrics.RideRequestsTotal.Inc()
-
 	// Compute distance server-side using Google Routes API
 	route, err := h.RouteClient.CalculateETA(r.Context(), req.PickupLat, req.PickupLng, req.DropoffLat, req.DropoffLng)
 	if err != nil {
-		log.Printf("[RideHandler] Failed to compute route: %v", err)
+		log.Error().Err(err).Msg("Failed to compute route")
 	} else if route != nil {
 		newRide.Route = route
 	}
 
 	// Calculate estimated fare upfront and lock it in
 	if newRide.AmbTypeID == nil || *newRide.AmbTypeID == "" {
-		log.Printf("[RideHandler] Fare skipped: AmbTypeID is nil or empty")
+		log.Warn().Msg("Fare skipped: AmbTypeID is nil or empty")
 	} else {
 		ambType, err := h.AdminStore.GetAmbulanceTypeByID(r.Context(), *newRide.AmbTypeID)
 		if err != nil {
-			log.Printf("[RideHandler] Fare skipped: GetAmbulanceTypeByID error: %v", err)
+			log.Error().Err(err).Msg("Fare skipped: GetAmbulanceTypeByID error")
 		} else if ambType == nil {
-			log.Printf("[RideHandler] Fare skipped: ambType not found for ID %s", *newRide.AmbTypeID)
+			log.Warn().Str("amb_type_id", *newRide.AmbTypeID).Msg("Fare skipped: ambType not found")
 		} else {
 			distanceKm := 0.0
 			if newRide.Route != nil {
 				distanceKm = newRide.Route.DistanceKm
 			}
 
-			log.Printf("[RideHandler] Fare input: baseFare=%.2f, driverShare=%.2f, tiers=%d, distance=%.3f",
-				ambType.BaseFare, ambType.DriverShare, len(ambType.PricingTier), distanceKm)
+			log.Debug().Float64("base_fare", ambType.BaseFare).Float64("driver_share", ambType.DriverShare).Int("tiers", len(ambType.PricingTier)).Float64("distance", distanceKm).Msg("Fare input")
 
 			pricingTiers := make([]pricing.PricingTier, len(ambType.PricingTier))
 			for i, t := range ambType.PricingTier {
@@ -150,7 +157,7 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			driverShareTotal := dBase + dEmergency + dNight
 			driverShareTotal = float64(int(driverShareTotal*100)) / 100
 
-			log.Printf("[RideHandler] Fare computed: total=%.2f, driverShare=%.2f", totalAmount, driverShareTotal)
+			log.Debug().Float64("total", totalAmount).Float64("driver_share", driverShareTotal).Msg("Fare computed")
 
 			newRide.Fare = &ride.Fare{
 				BaseFare:           ambType.BaseFare,
@@ -165,8 +172,8 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// This triggers the database creation and starts the matching loop
-	if err := h.Dispatcher.RequestRide(newRide); err != nil {
-		http.Error(w, "Failed to request ride: "+err.Error(), http.StatusInternalServerError)
+	if err := h.Dispatcher.RequestRide(r.Context(), newRide); err != nil {
+		response.Error(w, "Failed to request ride: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -182,7 +189,7 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 func (h *RideHandler) HandleDriverAccept(w http.ResponseWriter, r *http.Request) {
 	driverID, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -191,11 +198,9 @@ func (h *RideHandler) HandleDriverAccept(w http.ResponseWriter, r *http.Request)
 	// Send to dispatcher
 	err := h.Dispatcher.HandleDriverAccept(r.Context(), rideID, driverID)
 	if err != nil {
-		http.Error(w, "Failed to accept ride: "+err.Error(), http.StatusConflict)
+		response.Error(w, "Failed to accept ride: "+err.Error(), http.StatusConflict)
 		return
 	}
-
-	metrics.RidesAssignedTotal.Inc()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
@@ -210,10 +215,11 @@ func (h *RideHandler) HandleDriverAccept(w http.ResponseWriter, r *http.Request)
 
 func (h *RideHandler) HandleArrive(w http.ResponseWriter, r *http.Request) {
 	rideID := r.PathValue("id")
+	reqID := requestid.FromContext(r.Context())
 
 	rideData, err := h.Dispatcher.RideStore.GetRideByID(r.Context(), rideID)
 	if err != nil || rideData == nil {
-		http.Error(w, "Ride not found", http.StatusNotFound)
+		response.Error(w, "Ride not found", http.StatusNotFound)
 		return
 	}
 
@@ -224,28 +230,31 @@ func (h *RideHandler) HandleArrive(w http.ResponseWriter, r *http.Request) {
 
 	err = h.Dispatcher.RideStore.UpdateRideStatus(r.Context(), rideID, ride.StatusAssigned, ride.StatusArrived)
 	if err != nil {
-		http.Error(w, "Failed to arrive at pickup: "+err.Error(), http.StatusBadRequest)
+		response.Error(w, "Failed to arrive at pickup: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusArrived)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideArrived, eventbus.RideStatusChangedPayload{
+		RideID: rideID, Status: string(ride.StatusArrived), RequestID: reqID,
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver Arrived"})
 }
 
 func (h *RideHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 	rideID := r.PathValue("id")
+	reqID := requestid.FromContext(r.Context())
 
 	var req struct {
 		OTP     string `json:"otp"`
 		UserOTP string `json:"user_otp"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
 	rideData, err := h.Dispatcher.RideStore.GetRideByID(r.Context(), rideID)
 	if err != nil || rideData == nil {
-		http.Error(w, "Ride not found", http.StatusNotFound)
+		response.Error(w, "Ride not found", http.StatusNotFound)
 		return
 	}
 
@@ -255,18 +264,27 @@ func (h *RideHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if rideData.Status == ride.StatusCompleted || rideData.Status == ride.StatusCancelled {
-		http.Error(w, "Ride is already completed or cancelled", http.StatusBadRequest)
+		response.Error(w, "Ride is already completed or cancelled", http.StatusBadRequest)
 		return
 	}
 
-	// Verify OTP
-	otp := req.OTP
-	if otp == "" {
-		otp = req.UserOTP
+	// Verify OTP if ambulance type requires it
+	otpRequired := true
+	if rideData.AmbTypeID != nil {
+		ambType, err := h.AdminStore.GetAmbulanceTypeByID(r.Context(), *rideData.AmbTypeID)
+		if err == nil && ambType != nil {
+			otpRequired = ambType.OTPRequired
+		}
 	}
-	if otp != "" && rideData.StartOTP != otp {
-		http.Error(w, "Invalid OTP", http.StatusBadRequest)
-		return
+	if otpRequired {
+		otp := req.OTP
+		if otp == "" {
+			otp = req.UserOTP
+		}
+		if otp == "" || rideData.StartOTP != otp {
+			response.Error(w, "Invalid OTP", http.StatusBadRequest)
+			return
+		}
 	}
 
 	if rideData.Status == ride.StatusAssigned {
@@ -275,23 +293,26 @@ func (h *RideHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 	}
 	err = h.Dispatcher.RideStore.UpdateRideStatus(r.Context(), rideID, rideData.Status, ride.StatusInProgress)
 	if err != nil {
-		http.Error(w, "Failed to start ride: "+err.Error(), http.StatusBadRequest)
+		response.Error(w, "Failed to start ride: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusInProgress)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideStarted, eventbus.RideStatusChangedPayload{
+		RideID: rideID, Status: string(ride.StatusInProgress), RequestID: reqID,
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Ride Started"})
 }
 
 func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	rideID := r.PathValue("id")
 	driverID, _ := r.Context().Value(middleware.UserIDKey).(string)
+	reqID := requestid.FromContext(r.Context())
 
 	var req struct {
 		DropAddress string `json:"drop_address"`
 		PaymentMode string `json:"payment_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 	if req.PaymentMode == "" {
@@ -300,13 +321,13 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 	rideData, err := h.Dispatcher.RideStore.GetRideByID(r.Context(), rideID)
 	if err != nil || rideData == nil {
-		http.Error(w, "Ride not found", http.StatusNotFound)
+		response.Error(w, "Ride not found", http.StatusNotFound)
 		return
 	}
 
 	err = h.Dispatcher.RideStore.UpdateRideStatus(r.Context(), rideID, ride.StatusInProgress, ride.StatusCompleted)
 	if err != nil {
-		http.Error(w, "Failed to complete ride: "+err.Error(), http.StatusBadRequest)
+		response.Error(w, "Failed to complete ride: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -380,10 +401,22 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.PaymentStore.CreatePayment(r.Context(), pmt)
-	metrics.RidesCompletedTotal.Inc()
 
-	h.Dispatcher.WSManager.ClearActiveRide(driverID)
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusCompleted)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideCompleted, eventbus.RideCompletedPayload{
+		RideID:      rideID,
+		DriverID:    driverID,
+		UserID:      rideData.UserID,
+		PaymentMode: req.PaymentMode,
+		FinalAmount: finalAmount,
+		DriverShare: func() float64 {
+			if rideData.Fare != nil {
+				return rideData.Fare.DriverShare
+			}
+			return 0
+		}(),
+		DropAddress: req.DropAddress,
+		RequestID:   reqID,
+	})
 
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"detail":            "Ride Completed",
@@ -396,12 +429,19 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 
 func (h *RideHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 	rideID := r.PathValue("id")
+	callerID, _ := r.Context().Value(middleware.UserIDKey).(string)
+	callerRole, _ := r.Context().Value(middleware.UserRoleKey).(string)
+	reqID := requestid.FromContext(r.Context())
 
 	rideData, err := h.Dispatcher.RideStore.GetRideByID(r.Context(), rideID)
 	if err != nil || rideData == nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		json.NewEncoder(w).Encode(map[string]string{"detail": "Ride not found"})
+		response.Error(w, "Ride not found", http.StatusNotFound)
+		return
+	}
+
+	// Verify ownership: only the ride's user or assigned driver can cancel
+	if callerID != rideData.UserID && (rideData.DriverID == nil || callerID != *rideData.DriverID) {
+		response.Error(w, "Forbidden: you do not own this ride", http.StatusForbidden)
 		return
 	}
 
@@ -412,28 +452,33 @@ func (h *RideHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 
 	err = h.Dispatcher.RideStore.UpdateRideStatus(r.Context(), rideID, rideData.Status, ride.StatusCancelled)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"detail": "Failed to cancel ride: " + err.Error()})
+		response.Error(w, "Failed to cancel ride: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if rideData.DriverID != nil {
-		h.Dispatcher.WSManager.ClearActiveRide(*rideData.DriverID)
-	}
-	metrics.RidesCancelledTotal.Inc()
-	h.Dispatcher.WSManager.SendToRideWatchers(rideID, "RIDE_UPDATE", map[string]string{"ride_id": rideID, "status": string(ride.StatusCancelled)})
+	h.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
+		RideID:    rideID,
+		Reason:    func() string { if callerRole == "driver" { return "driver_cancelled" }; return "user_cancelled" }(),
+		UserID:    rideData.UserID,
+		DriverID: func() string {
+			if rideData.DriverID != nil {
+				return *rideData.DriverID
+			}
+			return ""
+		}(),
+		RequestID: reqID,
+	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Ride Cancelled"})
 }
 
 func (h *RideHandler) HandleGetHistory(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	role, ok := r.Context().Value(middleware.UserRoleKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -445,7 +490,7 @@ func (h *RideHandler) HandleGetHistory(w http.ResponseWriter, r *http.Request) {
 
 	rides, err := h.Dispatcher.RideStore.GetRideHistory(r.Context(), uidStr, role, limit, skip)
 	if err != nil {
-		http.Error(w, "Failed to fetch history: "+err.Error(), http.StatusInternalServerError)
+		response.Error(w, "Failed to fetch history: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -456,12 +501,12 @@ func (h *RideHandler) HandleGetHistory(w http.ResponseWriter, r *http.Request) {
 func (h *RideHandler) HandleGetCurrentRide(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 	role, ok := r.Context().Value(middleware.UserRoleKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -480,7 +525,7 @@ func (h *RideHandler) HandleGetCurrentRide(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err != nil {
-		http.Error(w, "Failed to fetch ride: "+err.Error(), http.StatusInternalServerError)
+		response.Error(w, "Failed to fetch ride: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -510,33 +555,36 @@ func (h *RideHandler) HandleGetCurrentRide(w http.ResponseWriter, r *http.Reques
 // HandleGetDriverDetails is used by the User App to get the driver's info
 func (h *RideHandler) HandleGetDriverDetails(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RideID string `json:"ride_id"`
+		RideID string `json:"ride_id" validate:"required"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
 		return
 	}
 
 	rideData, err := h.Dispatcher.RideStore.GetRideByID(r.Context(), req.RideID)
 	if err != nil || rideData == nil {
-		http.Error(w, "Ride not found", http.StatusNotFound)
+		response.Error(w, "Ride not found", http.StatusNotFound)
 		return
 	}
 
 	if rideData.DriverID == nil {
-		http.Error(w, "No driver assigned yet", http.StatusNotFound)
+		response.Error(w, "No driver assigned yet", http.StatusNotFound)
 		return
 	}
 
 	objID, err := primitive.ObjectIDFromHex(*rideData.DriverID)
 	if err != nil {
-		http.Error(w, "Invalid driver ID", http.StatusBadRequest)
+		response.Error(w, "Invalid driver ID", http.StatusBadRequest)
 		return
 	}
 
 	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
 	if err != nil || driver == nil {
-		http.Error(w, "Driver not found", http.StatusNotFound)
+		response.Error(w, "Driver not found", http.StatusNotFound)
 		return
 	}
 
@@ -547,28 +595,31 @@ func (h *RideHandler) HandleGetDriverDetails(w http.ResponseWriter, r *http.Requ
 // HandleGetUserDetails is used by the Driver App to get the user's info
 func (h *RideHandler) HandleGetUserDetails(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		RideID string `json:"ride_id"`
+		RideID string `json:"ride_id" validate:"required"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
 		return
 	}
 
 	rideData, err := h.Dispatcher.RideStore.GetRideByID(r.Context(), req.RideID)
 	if err != nil || rideData == nil {
-		http.Error(w, "Ride not found", http.StatusNotFound)
+		response.Error(w, "Ride not found", http.StatusNotFound)
 		return
 	}
 
 	objID, err := primitive.ObjectIDFromHex(rideData.UserID)
 	if err != nil {
-		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		response.Error(w, "Invalid user ID", http.StatusBadRequest)
 		return
 	}
 
 	user, err := h.AuthStore.FindUserByID(r.Context(), objID)
 	if err != nil || user == nil {
-		http.Error(w, "User not found", http.StatusNotFound)
+		response.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
 
@@ -578,19 +629,22 @@ func (h *RideHandler) HandleGetUserDetails(w http.ResponseWriter, r *http.Reques
 
 func (h *RideHandler) HandleRoutePreview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		OriginLat  float64 `json:"origin_lat"`
-		OriginLng  float64 `json:"origin_lng"`
-		DestLat    float64 `json:"dest_lat"`
-		DestLng    float64 `json:"dest_lng"`
+		OriginLat  float64 `json:"origin_lat" validate:"required,min=-90,max=90"`
+		OriginLng  float64 `json:"origin_lng" validate:"required,min=-180,max=180"`
+		DestLat    float64 `json:"dest_lat" validate:"required,min=-90,max=90"`
+		DestLng    float64 `json:"dest_lng" validate:"required,min=-180,max=180"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
 		return
 	}
 
 	route, err := h.RouteClient.CalculateETA(r.Context(), req.OriginLat, req.OriginLng, req.DestLat, req.DestLng)
 	if err != nil {
-		http.Error(w, "Failed to compute route: "+err.Error(), http.StatusInternalServerError)
+		response.Error(w, "Failed to compute route: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -609,15 +663,14 @@ func (h *RideHandler) HandleRoutePreview(w http.ResponseWriter, r *http.Request)
 
 func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		DistanceKm float64 `json:"distance_km"`
+		DistanceKm float64 `json:"distance_km" validate:"required,gt=0"`
 		AmbTypeID  string  `json:"amb_type_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
-	if req.DistanceKm <= 0 {
-		http.Error(w, "distance_km must be positive", http.StatusBadRequest)
+	if !response.Validate(w, &req) {
 		return
 	}
 
@@ -625,7 +678,7 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 	if req.AmbTypeID != "" {
 		ambType, err := h.AdminStore.GetAmbulanceTypeByID(r.Context(), req.AmbTypeID)
 		if err != nil || ambType == nil {
-			http.Error(w, "Ambulance type not found", http.StatusNotFound)
+			response.Error(w, "Ambulance type not found", http.StatusNotFound)
 			return
 		}
 
@@ -663,7 +716,7 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 	// No amb_type_id — estimate for all types
 	allTypes, err := h.AdminStore.ListAmbulanceTypes(r.Context())
 	if err != nil {
-		http.Error(w, "Failed to load ambulance types", http.StatusInternalServerError)
+		response.Error(w, "Failed to load ambulance types", http.StatusInternalServerError)
 		return
 	}
 

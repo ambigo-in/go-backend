@@ -1,13 +1,14 @@
 package dispatch
 
 import (
-	"ambigo-backend/interfaces"
-	"ambigo-backend/internal/location"
 	"context"
 	"errors"
-	"log"
 	"sort"
 	"sync"
+
+	"ambigo-backend/interfaces"
+	"ambigo-backend/internal/location"
+	"ambigo-backend/internal/logger"
 )
 
 type Candidate struct {
@@ -35,13 +36,11 @@ func NewMatcher(ls *location.MemoryStore, rc *RouteClient) *Matcher {
 func (m *Matcher) FindBestDrivers(ctx context.Context, pickupLat, pickupLng float64, maxCandidates int, ambTypeID string) ([]Candidate, error) {
 	originCell := location.GetH3Cell(pickupLat, pickupLng)
 
-	// 2. Expand search radius to 1-ring (Origin + 6 immediate neighbors)
 	searchCells, err := location.GetNeighborCells(originCell)
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. Get all drivers in those 7 cells
 	driverIDs, err := m.LocStore.GetDriversInCells(searchCells)
 	if err != nil {
 		return nil, err
@@ -80,7 +79,6 @@ func (m *Matcher) FindBestDrivers(ctx context.Context, pickupLat, pickupLng floa
 		return nil, errors.New("no drivers found in the vicinity")
 	}
 
-	// 4. Call Google Routes API in parallel (max 10 concurrent)
 	var candidates []Candidate
 	var mu sync.Mutex
 	sem := make(chan struct{}, 10)
@@ -95,7 +93,8 @@ func (m *Matcher) FindBestDrivers(ctx context.Context, pickupLat, pickupLng floa
 
 			route, err := m.RouteCli.CalculateETA(ctx, d.lat, d.lng, pickupLat, pickupLng)
 			if err != nil {
-				log.Printf("[Matcher] Error getting ETA for driver %s: %v", d.id, err)
+				l := logger.Ctx(ctx)
+			l.Error().Err(err).Str("driver_id", d.id).Msg("Error getting ETA for driver")
 				return
 			}
 
@@ -112,12 +111,10 @@ func (m *Matcher) FindBestDrivers(ctx context.Context, pickupLat, pickupLng floa
 
 	wg.Wait()
 
-	// 5. Sort the candidates by lowest ETA
 	sort.Slice(candidates, func(i, j int) bool {
 		return candidates[i].ETASeconds < candidates[j].ETASeconds
 	})
 
-	// 6. Return up to the maximum requested candidates
 	if len(candidates) > maxCandidates {
 		candidates = candidates[:maxCandidates]
 	}

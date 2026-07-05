@@ -17,10 +17,22 @@ import (
 // RouteClient handles communication with Google Routes API
 type RouteClient struct {
 	APIKey string
+	APIURL string
+	Client *http.Client
 }
 
-func NewRouteClient(apiKey string) *RouteClient {
-	return &RouteClient{APIKey: apiKey}
+func NewRouteClient(apiKey, apiURL string) *RouteClient {
+	return &RouteClient{
+		APIKey: apiKey,
+		APIURL: apiURL,
+		Client: &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:    20,
+				IdleConnTimeout: 90 * time.Second,
+			},
+		},
+	}
 }
 
 type computeRoutesRequest struct {
@@ -85,7 +97,7 @@ func (rc *RouteClient) CalculateETA(ctx context.Context, originLat, originLng, d
 			return err
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "POST", "https://routes.googleapis.com/directions/v2:computeRoutes", bytes.NewBuffer(jsonData))
+		req, err := http.NewRequestWithContext(ctx, "POST", rc.APIURL, bytes.NewBuffer(jsonData))
 		if err != nil {
 			return err
 		}
@@ -94,10 +106,8 @@ func (rc *RouteClient) CalculateETA(ctx context.Context, originLat, originLng, d
 		req.Header.Set("X-Goog-Api-Key", rc.APIKey)
 		req.Header.Set("X-Goog-FieldMask", "routes.duration,routes.distanceMeters,routes.polyline.encodedPolyline")
 
-		client := &http.Client{Timeout: 5 * time.Second}
-
 		start := time.Now()
-		resp, err := client.Do(req)
+		resp, err := rc.Client.Do(req)
 		metrics.ObserveGoogleAPI(time.Since(start))
 		if err != nil {
 			return err

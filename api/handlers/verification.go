@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
-
 	"ambigo-backend/api/middleware"
+	"ambigo-backend/api/response"
 	"ambigo-backend/internal/auth"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type VerificationHandler struct {
@@ -25,7 +26,7 @@ func NewVerificationHandler(authStore *auth.Store) *VerificationHandler {
 func (h *VerificationHandler) HandleCheckVerification(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -34,7 +35,7 @@ func (h *VerificationHandler) HandleCheckVerification(w http.ResponseWriter, r *
 	// First, check the active drivers collection
 	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
@@ -47,7 +48,7 @@ func (h *VerificationHandler) HandleCheckVerification(w http.ResponseWriter, r *
 	// Next, check the unverified drivers collection
 	unverified, err := h.AuthStore.FindUnverifiedDriverByID(r.Context(), objID)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
@@ -57,7 +58,7 @@ func (h *VerificationHandler) HandleCheckVerification(w http.ResponseWriter, r *
 		return
 	}
 
-	http.Error(w, "User not found", http.StatusNotFound)
+	response.Error(w, "User not found", http.StatusNotFound)
 }
 
 // HandleUpdateVerification handles the document upload pipeline for drivers
@@ -67,7 +68,10 @@ func (h *VerificationHandler) HandleUpdateVerification(w http.ResponseWriter, r 
 
 	var payload auth.UnverifiedDriver
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &payload) {
 		return
 	}
 
@@ -76,7 +80,7 @@ func (h *VerificationHandler) HandleUpdateVerification(w http.ResponseWriter, r 
 
 	err := h.AuthStore.UpdateUnverifiedDriver(r.Context(), &payload)
 	if err != nil {
-		http.Error(w, "Failed to update driver details", http.StatusInternalServerError)
+		response.Error(w, "Failed to update driver details", http.StatusInternalServerError)
 		return
 	}
 

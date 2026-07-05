@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"ambigo-backend/api/middleware"
+	"ambigo-backend/api/response"
 	"ambigo-backend/internal/ride"
 )
 
@@ -21,20 +22,23 @@ func NewFeedbackHandler(fStore *ride.FeedbackStore) *FeedbackHandler {
 func (h *FeedbackHandler) HandleSubmitFeedback(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var req ride.Feedback
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
 	req.UserID = uidStr // Enforce user ID from JWT
+	if !response.Validate(w, &req) {
+		return
+	}
 
 	if err := h.FeedbackStore.InsertFeedback(r.Context(), &req); err != nil {
-		http.Error(w, "Error submitting the feedback", http.StatusBadRequest)
+		response.Error(w, "Error submitting the feedback", http.StatusBadRequest)
 		return
 	}
 
@@ -45,13 +49,13 @@ func (h *FeedbackHandler) HandleListFeedback(w http.ResponseWriter, r *http.Requ
 	// Driver fetching their own feedback
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	list, err := h.FeedbackStore.ListFeedback(r.Context(), uidStr)
 	if err != nil {
-		http.Error(w, "Failed to list feedback", http.StatusInternalServerError)
+		response.Error(w, "Failed to list feedback", http.StatusInternalServerError)
 		return
 	}
 

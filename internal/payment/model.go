@@ -13,7 +13,6 @@ const (
 	ModeOnline PaymentMode = "online"
 )
 
-// Payment represents a transaction record for a completed ride
 type Payment struct {
 	ID                primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
 	UserID            string             `bson:"user_id" json:"user_id"`
@@ -28,4 +27,5 @@ type Payment struct {
 	RazorpayPaymentID *string            `bson:"razorpay_payment_id,omitempty" json:"razorpay_payment_id,omitempty"`
 	PaidAt            *time.Time         `bson:"paid_at,omitempty" json:"paid_at,omitempty"`
 	CreatedAt         time.Time          `bson:"created_at" json:"created_at"`
+	Offer             *string            `bson:"offer,omitempty" json:"offer,omitempty"`
 }

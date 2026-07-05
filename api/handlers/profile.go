@@ -4,10 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"go.mongodb.org/mongo-driver/bson/primitive"
-
 	"ambigo-backend/api/middleware"
+	"ambigo-backend/api/response"
 	"ambigo-backend/internal/auth"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type ProfileHandler struct {
@@ -28,23 +29,23 @@ func NewProfileHandler(authStore *auth.Store) *ProfileHandler {
 func (h *ProfileHandler) HandleGetUserProfile(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	objID, err := primitive.ObjectIDFromHex(uidStr)
 	if err != nil {
-		http.Error(w, "Invalid User ID format", http.StatusBadRequest)
+		response.Error(w, "Invalid User ID format", http.StatusBadRequest)
 		return
 	}
 
 	user, err := h.AuthStore.FindUserByID(r.Context(), objID)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	if user == nil {
-		http.Error(w, "User not found", http.StatusNotFound)
+		response.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
 
@@ -61,13 +62,13 @@ func (h *ProfileHandler) HandleUpdateUserFCM(w http.ResponseWriter, r *http.Requ
 		FCMToken string `json:"fcm_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
 	err := h.AuthStore.UpdateUserFCM(r.Context(), objID, payload.FCMToken)
 	if err != nil {
-		http.Error(w, "Failed to update FCM token", http.StatusInternalServerError)
+		response.Error(w, "Failed to update FCM token", http.StatusInternalServerError)
 		return
 	}
 
@@ -88,11 +89,11 @@ func (h *ProfileHandler) HandleGetDriverProfile(w http.ResponseWriter, r *http.R
 	if role == "unvrf_driver" {
 		driver, err := h.AuthStore.FindUnverifiedDriverByID(r.Context(), objID)
 		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
+			response.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
 		if driver == nil {
-			http.Error(w, "User not found", http.StatusNotFound)
+			response.Error(w, "User not found", http.StatusNotFound)
 			return
 		}
 
@@ -103,11 +104,11 @@ func (h *ProfileHandler) HandleGetDriverProfile(w http.ResponseWriter, r *http.R
 
 	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	if driver == nil {
-		http.Error(w, "Driver not found", http.StatusNotFound)
+		response.Error(w, "Driver not found", http.StatusNotFound)
 		return
 	}
 
@@ -125,7 +126,7 @@ func (h *ProfileHandler) HandleUpdateDriverFCM(w http.ResponseWriter, r *http.Re
 		FCMToken string `json:"fcm_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
 
@@ -136,7 +137,7 @@ func (h *ProfileHandler) HandleUpdateDriverFCM(w http.ResponseWriter, r *http.Re
 		err = h.AuthStore.UpdateDriverFCM(r.Context(), objID, payload.FCMToken)
 	}
 	if err != nil {
-		http.Error(w, "Failed to update FCM token", http.StatusInternalServerError)
+		response.Error(w, "Failed to update FCM token", http.StatusInternalServerError)
 		return
 	}
 

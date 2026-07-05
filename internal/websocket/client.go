@@ -1,23 +1,20 @@
 package websocket
 
 import (
-	"log"
 	"time"
+
+	"ambigo-backend/internal/logger"
 
 	"github.com/gorilla/websocket"
 )
 
 const (
-	// Time allowed to write a message to the peer.
 	writeWait = 10 * time.Second
 
-	// Time allowed to read the next pong message from the peer.
 	pongWait = 60 * time.Second
 
-	// Send pings to peer with this period. Must be less than pongWait.
 	pingPeriod = (pongWait * 9) / 10
 
-	// Maximum message size allowed from peer.
 	maxMessageSize = 1024
 )
 
@@ -25,16 +22,12 @@ const (
 type Client struct {
 	Manager *Manager
 
-	// The websocket connection.
 	Conn *websocket.Conn
 
-	// Buffered channel of outbound messages.
 	Send chan []byte
 
-	// User or Driver ID
 	ID string
 
-	// Role ("driver" or "user")
 	Role string
 }
 
@@ -52,11 +45,10 @@ func (c *Client) ReadPump() {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				logger.Log.Error().Err(err).Msg("WebSocket read error")
 			}
 			break
 		}
-		// Handle incoming messages
 		c.Manager.HandleIncomingMessage(c, message)
 	}
 }
@@ -73,24 +65,22 @@ func (c *Client) WritePump() {
 		case message, ok := <-c.Send:
 			c.Conn.SetWriteDeadline(time.Now().Add(writeWait))
 			if !ok {
-				// The hub closed the channel.
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
-			log.Printf("[WebSocket] Sending to %s %s: %s", c.Role, c.ID, string(message))
+			logger.Log.Debug().Str("role", c.Role).Str("id", c.ID).Str("msg", string(message)).Msg("Sending to client")
 			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
-				log.Printf("[WebSocket] Write error for %s %s: %v", c.Role, c.ID, err)
+				logger.Log.Error().Err(err).Str("role", c.Role).Str("id", c.ID).Msg("Write error")
 				return
 			}
 
-			// Drain and send any other queued messages, each as its own frame
 			n := len(c.Send)
 			for i := 0; i < n; i++ {
 				nextMsg := <-c.Send
-				log.Printf("[WebSocket] Sending queued to %s %s: %s", c.Role, c.ID, string(nextMsg))
+				logger.Log.Debug().Str("role", c.Role).Str("id", c.ID).Str("msg", string(nextMsg)).Msg("Sending queued to client")
 				if err := c.Conn.WriteMessage(websocket.TextMessage, nextMsg); err != nil {
-					log.Printf("[WebSocket] Write error for %s %s: %v", c.Role, c.ID, err)
+					logger.Log.Error().Err(err).Str("role", c.Role).Str("id", c.ID).Msg("Write error")
 					return
 				}
 			}

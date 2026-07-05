@@ -35,20 +35,20 @@ type DriverDetails struct {
 
 // WalletDetails tracks a driver's Zwitch banking configuration
 type WalletDetails struct {
-	AccountNo string `bson:"account_no" json:"account_no"`
-	BenfName  string `bson:"benf_name" json:"benf_name"`
-	IFSCCode  string `bson:"ifsc_code" json:"ifsc_code"`
+	AccountNo string `bson:"account_no" json:"account_no" validate:"required"`
+	BenfName  string `bson:"benf_name" json:"benf_name" validate:"required"`
+	IFSCCode  string `bson:"ifsc_code" json:"ifsc_code" validate:"required"`
 	BenfID    string `bson:"benf_id" json:"benf_id"`
 }
 
 // Driver represents a fully verified active driver profile
 type Driver struct {
 	ID                 primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
-	Name               string             `bson:"name" json:"name"`
-	Mobile             string             `bson:"mobile" json:"mobile"`
+	Name               string             `bson:"name" json:"name" validate:"required"`
+	Mobile             string             `bson:"mobile" json:"mobile" validate:"required"`
 	Photo              string             `bson:"photo" json:"photo"`
-	VehicleType        string             `bson:"vehicle_type" json:"vehicle_type"`
-	VehicleReg         string             `bson:"vehicle_registration" json:"vehicle_registration"`
+	VehicleType        string             `bson:"vehicle_type" json:"vehicle_type" validate:"required"`
+	VehicleReg         string             `bson:"vehicle_registration" json:"vehicle_registration" validate:"required"`
 	WalletDetails      WalletDetails      `bson:"wallet_details" json:"wallet_details"`
 	WalletBalance      float64            `bson:"wallet_balance" json:"wallet_balance"`
 	ReferralCode       string             `bson:"referral_code" json:"referral_code"`
@@ -62,8 +62,8 @@ type Driver struct {
 // UnverifiedDriver represents a driver in the onboarding pipeline
 type UnverifiedDriver struct {
 	ID                 primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
-	Name               string             `bson:"name" json:"name"`
-	Mobile             string             `bson:"mobile" json:"mobile"`
+	Name               string             `bson:"name" json:"name" validate:"required"`
+	Mobile             string             `bson:"mobile" json:"mobile" validate:"required"`
 	PortraitImage      string             `bson:"portrait_image" json:"portrait_image"`
 	POIImage           string             `bson:"poi_image" json:"poi_image"`
 	DLImage            string             `bson:"dl_image" json:"dl_image"`
@@ -94,6 +94,6 @@ type Referral struct {
 	RefTo           string             `bson:"ref_to" json:"ref_to"`
 	Value           string             `bson:"value" json:"value"`
 	RidesDone       int                `bson:"rides_done" json:"rides_done"`
-	AmountReceived  bool               `bson:"amount_received" json:"amount_received"`
+	AmountReceived  bool               `bson:"amount_recievied" json:"amount_received"`
 	CreatedAt       time.Time          `bson:"created_at" json:"created_at"`
 }

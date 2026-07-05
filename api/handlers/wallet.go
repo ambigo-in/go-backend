@@ -7,21 +7,26 @@ import (
 	"time"
 
 	"ambigo-backend/api/middleware"
+	"ambigo-backend/api/response"
 	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/payment"
+	"ambigo-backend/internal/requestid"
 
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type WalletHandler struct {
 	AuthStore     *auth.Store
+	EventBus      *eventbus.InMemoryBus
 	WalletStore   *payment.WalletStore
 	ZwitchService *payment.ZwitchService
 }
 
-func NewWalletHandler(authStore *auth.Store, wStore *payment.WalletStore, zService *payment.ZwitchService) *WalletHandler {
+func NewWalletHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, wStore *payment.WalletStore, zService *payment.ZwitchService) *WalletHandler {
 	return &WalletHandler{
 		AuthStore:     authStore,
+		EventBus:      eventBus,
 		WalletStore:   wStore,
 		ZwitchService: zService,
 	}
@@ -30,14 +35,14 @@ func NewWalletHandler(authStore *auth.Store, wStore *payment.WalletStore, zServi
 func (h *WalletHandler) HandleGetWallet(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	objID, _ := primitive.ObjectIDFromHex(uidStr)
 	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
 	if err != nil || driver == nil {
-		http.Error(w, "Driver not found", http.StatusNotFound)
+		response.Error(w, "Driver not found", http.StatusNotFound)
 		return
 	}
 
@@ -48,25 +53,23 @@ func (h *WalletHandler) HandleGetWallet(w http.ResponseWriter, r *http.Request) 
 func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	var req auth.WalletDetails
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
-
-	if req.AccountNo == "" || req.BenfName == "" || req.IFSCCode == "" {
-		http.Error(w, "Invalid Account Details", http.StatusBadRequest)
+	if !response.Validate(w, &req) {
 		return
 	}
 
 	objID, _ := primitive.ObjectIDFromHex(uidStr)
 	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
 	if err != nil || driver == nil {
-		http.Error(w, "Driver not found", http.StatusNotFound)
+		response.Error(w, "Driver not found", http.StatusNotFound)
 		return
 	}
 
@@ -75,7 +78,7 @@ func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Reques
 		// New beneficiary
 		benfID, err := h.ZwitchService.CreateBeneficiary(&req, uidStr)
 		if err != nil || benfID == "" {
-			http.Error(w, "Zwitch Beneficiary Account Creation error", http.StatusBadRequest)
+			response.Error(w, "Zwitch Beneficiary Account Creation error", http.StatusBadRequest)
 			return
 		}
 		req.BenfID = benfID
@@ -88,7 +91,7 @@ func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Reques
 			// Account changed entirely, recreate
 			benfID, err := h.ZwitchService.CreateBeneficiary(&req, uidStr)
 			if err != nil || benfID == "" {
-				http.Error(w, "Zwitch Beneficiary Account Creation error", http.StatusBadRequest)
+				response.Error(w, "Zwitch Beneficiary Account Creation error", http.StatusBadRequest)
 				return
 			}
 			req.BenfID = benfID
@@ -97,7 +100,7 @@ func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Reques
 	}
 
 	if err := h.WalletStore.UpdateWalletDetails(r.Context(), objID, req); err != nil {
-		http.Error(w, "Error updating wallet details", http.StatusInternalServerError)
+		response.Error(w, "Error updating wallet details", http.StatusInternalServerError)
 		return
 	}
 
@@ -107,32 +110,36 @@ func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Reques
 func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	reqID := requestid.FromContext(r.Context())
 
 	var req struct {
-		Amount float64 `json:"amount"`
+		Amount float64 `json:"amount" validate:"required,gt=0"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
 		return
 	}
 
 	objID, _ := primitive.ObjectIDFromHex(uidStr)
 	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
 	if err != nil || driver == nil {
-		http.Error(w, "Driver not found", http.StatusNotFound)
+		response.Error(w, "Driver not found", http.StatusNotFound)
 		return
 	}
 
 	if driver.WalletBalance < req.Amount {
-		http.Error(w, "Requested amount is greater than wallet balance!!", http.StatusBadRequest)
+		response.Error(w, "Requested amount is greater than wallet balance!!", http.StatusBadRequest)
 		return
 	}
 
 	if driver.WalletDetails.BenfID == "" {
-		http.Error(w, "Driver Account Details not found", http.StatusBadRequest)
+		response.Error(w, "Driver Account Details not found", http.StatusBadRequest)
 		return
 	}
 
@@ -142,13 +149,13 @@ func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 	// Rs. 7 fee for transaction
 	amountToTransfer := req.Amount - 7
 	if amountToTransfer <= 0 {
-		http.Error(w, "Amount too low to cover 7rs fee", http.StatusBadRequest)
+		response.Error(w, "Amount too low to cover 7rs fee", http.StatusBadRequest)
 		return
 	}
 
 	resp, err := h.ZwitchService.CreateTransfer(&driver.WalletDetails, amountToTransfer, merchantRefID)
 	if err != nil || resp == nil {
-		http.Error(w, "Withdrawal Initiation failed", http.StatusBadRequest)
+		response.Error(w, "Withdrawal Initiation failed", http.StatusBadRequest)
 		return
 	}
 
@@ -179,19 +186,23 @@ func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 
 	h.WalletStore.InsertTransaction(r.Context(), tx)
 
+	h.EventBus.PublishEvent(eventbus.ChannelWalletWithdrawal, eventbus.WalletWithdrawalPayload{
+		DriverID: uidStr, Amount: req.Amount, Status: status, RequestID: reqID,
+	})
+
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Withdrawal initiated, amount will be transferred shortly!!"})
 }
 
 func (h *WalletHandler) HandleListTransactions(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	list, err := h.WalletStore.ListTransactions(r.Context(), uidStr)
 	if err != nil {
-		http.Error(w, "Failed to list transactions", http.StatusInternalServerError)
+		response.Error(w, "Failed to list transactions", http.StatusInternalServerError)
 		return
 	}
 

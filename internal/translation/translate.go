@@ -12,11 +12,22 @@ import (
 // Map maps a target locale like "hi_IN" to the translation string
 type Map map[string]string
 
+// TranslateAPIURL is the base URL for Google Translate (set from config at startup)
+var TranslateAPIURL = "https://translate.googleapis.com/translate_a/single"
+
 var languages = map[string]string{
 	"en_US": "en",
 	"hi_IN": "hi",
 	"te_IN": "te",
 	"kn_IN": "kn",
+}
+
+var translateClient = &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:    5,
+		IdleConnTimeout: 90 * time.Second,
+	},
 }
 
 // TranslateField concurrently translates the input text into the target languages.
@@ -29,7 +40,6 @@ func TranslateField(text string) Map {
 		return translations
 	}
 
-	client := &http.Client{Timeout: 5 * time.Second}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 
@@ -37,7 +47,7 @@ func TranslateField(text string) Map {
 		wg.Add(1)
 		go func(k, c string) {
 			defer wg.Done()
-			translated := fetchTranslation(client, text, c)
+			translated := fetchTranslation(translateClient, text, c)
 			mu.Lock()
 			translations[k] = translated
 			mu.Unlock()
@@ -54,7 +64,7 @@ func fetchTranslation(client *http.Client, text, code string) string {
 	}
 
 	encodedText := url.QueryEscape(text)
-	urlStr := fmt.Sprintf("https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=%s&dt=t&q=%s", code, encodedText)
+	urlStr := fmt.Sprintf("%s?client=gtx&sl=auto&tl=%s&dt=t&q=%s", TranslateAPIURL, code, encodedText)
 
 	req, err := http.NewRequest("GET", urlStr, nil)
 	if err != nil {

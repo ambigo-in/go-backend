@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"ambigo-backend/api/response"
 	"ambigo-backend/internal/auth"
 )
 
@@ -14,7 +15,7 @@ func APIKeyAuth(expectedKey string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			key := r.Header.Get("X-API-Key")
 			if key == "" || key != expectedKey {
-				http.Error(w, "Forbidden: invalid API key", http.StatusForbidden)
+				response.Error(w, "Forbidden: invalid API key", http.StatusForbidden)
 				return
 			}
 			next.ServeHTTP(w, r)
@@ -35,21 +36,21 @@ func JWTAuth(secret string) func(http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			authHeader := r.Header.Get("Authorization")
 			if authHeader == "" {
-				http.Error(w, "Missing Authorization Header", http.StatusUnauthorized)
+				response.Error(w, "Missing Authorization Header", http.StatusUnauthorized)
 				return
 			}
 
 			// Expect "Bearer <token>"
 			parts := strings.Split(authHeader, " ")
 			if len(parts) != 2 || parts[0] != "Bearer" {
-				http.Error(w, "Invalid Authorization Header format", http.StatusUnauthorized)
+				response.Error(w, "Invalid Authorization Header format", http.StatusUnauthorized)
 				return
 			}
 
 			tokenString := parts[1]
 			claims, err := auth.ValidateToken(tokenString, secret)
 			if err != nil {
-				http.Error(w, "Invalid or expired token", http.StatusUnauthorized)
+				response.Error(w, "Invalid or expired token", http.StatusUnauthorized)
 				return
 			}
 
@@ -67,7 +68,7 @@ func RequireRole(requiredRole string, next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		role, ok := r.Context().Value(UserRoleKey).(string)
 		if !ok || role != requiredRole {
-			http.Error(w, "Forbidden: insufficient permissions", http.StatusForbidden)
+			response.Error(w, "Forbidden: insufficient permissions", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)

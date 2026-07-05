@@ -6,24 +6,35 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"time"
 )
 
-const SMSHeader = "AMBHPL"
+var smsClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		MaxIdleConns:    5,
+		IdleConnTimeout: 90 * time.Second,
+	},
+}
+
+// SMSCountryConfig holds configuration for SMSCountry API
+type SMSCountryConfig struct {
+	APIKey     string
+	APIToken   string
+	APIBaseURL string
+	SenderID   string
+	CC         string // country code prefix
+}
 
 // SendSMS calls the SMSCountry API to send an OTP
-func SendSMS(number string, otp string, appSignature string) error {
-	authKey := os.Getenv("SMS_COUNTRY_KEY")
-	authToken := os.Getenv("SMS_COUNTRY_TOKEN")
-
-	if authKey == "" || authToken == "" {
+func SendSMS(cfg SMSCountryConfig, number string, otp string, appSignature string) error {
+	if cfg.APIKey == "" || cfg.APIToken == "" {
 		return fmt.Errorf("SMS_COUNTRY_KEY or SMS_COUNTRY_TOKEN is not set in environment")
 	}
 
-	credentials := fmt.Sprintf("%s:%s", authKey, authToken)
+	credentials := fmt.Sprintf("%s:%s", cfg.APIKey, cfg.APIToken)
 	encodedCredentials := base64.StdEncoding.EncodeToString([]byte(credentials))
-	url := fmt.Sprintf("https://restapi.smscountry.com/v0.1/Accounts/%s/SMSes/", authKey)
+	url := fmt.Sprintf(cfg.APIBaseURL, cfg.APIKey)
 
 	// Build the message exactly like V1
 	msgContent := fmt.Sprintf("Your Ambigo verification code is: %s. Please do not share it with anyone else.", otp)
@@ -32,9 +43,9 @@ func SendSMS(number string, otp string, appSignature string) error {
 	}
 
 	payload := map[string]string{
-		"Number":   "91" + number,
+		"Number":   cfg.CC + number,
 		"Text":     msgContent,
-		"SenderId": SMSHeader,
+		"SenderId": cfg.SenderID,
 	}
 
 	jsonPayload, err := json.Marshal(payload)
@@ -50,8 +61,7 @@ func SendSMS(number string, otp string, appSignature string) error {
 	req.Header.Set("Authorization", "Basic "+encodedCredentials)
 	req.Header.Set("Content-Type", "application/json")
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := smsClient.Do(req)
 	if err != nil {
 		return err
 	}

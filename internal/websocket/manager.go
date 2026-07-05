@@ -2,12 +2,14 @@ package websocket
 
 import (
 	"context"
-	"ambigo-backend/internal/auth"
-	"ambigo-backend/internal/location"
-	"ambigo-backend/internal/metrics"
 	"encoding/json"
-	"log"
 	"sync"
+
+	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/location"
+	"ambigo-backend/internal/logger"
+	"ambigo-backend/internal/metrics"
 )
 
 // DeclineHandler is implemented by the dispatcher to handle driver ride declines.
@@ -47,9 +49,12 @@ type Manager struct {
 
 	// AuthStore for looking up driver details (vehicle type, etc.)
 	AuthStore *auth.Store
+
+	// EventBus for publishing driver location updates
+	EventBus *eventbus.InMemoryBus
 }
 
-func NewManager(locStore *location.MemoryStore, authStore *auth.Store) *Manager {
+func NewManager(locStore *location.MemoryStore, authStore *auth.Store, eventBus *eventbus.InMemoryBus) *Manager {
 	return &Manager{
 		broadcast:        make(chan []byte),
 		register:         make(chan *Client),
@@ -59,6 +64,7 @@ func NewManager(locStore *location.MemoryStore, authStore *auth.Store) *Manager 
 		activeDriverRide: make(map[string]string),
 		LocStore:         locStore,
 		AuthStore:        authStore,
+		EventBus:         eventBus,
 	}
 }
 
@@ -76,7 +82,7 @@ func (m *Manager) Run() {
 			m.clients[client.Role][client.ID][client] = true
 			m.mu.Unlock()
 			metrics.ActiveConnections.Inc()
-			log.Printf("[WebSocket] %s registered: %s", client.Role, client.ID)
+			logger.Log.Info().Str("role", client.Role).Str("id", client.ID).Msg("WebSocket registered")
 
 		case client := <-m.unregister:
 			m.mu.Lock()
@@ -85,7 +91,7 @@ func (m *Manager) Run() {
 					delete(clientsForID, client)
 					close(client.Send)
 					metrics.ActiveConnections.Dec()
-					log.Printf("[WebSocket] %s unregistered: %s", client.Role, client.ID)
+					logger.Log.Info().Str("role", client.Role).Str("id", client.ID).Msg("WebSocket unregistered")
 				}
 				if len(clientsForID) == 0 {
 					delete(m.clients[client.Role], client.ID)
@@ -140,7 +146,7 @@ func (m *Manager) SendToClient(role, id string, msgType string, payload interfac
 
 	rawPayload, err := json.Marshal(payload)
 	if err != nil {
-		log.Printf("[WebSocket] failed to marshal payload for %s %s: %v", role, id, err)
+		logger.Log.Error().Err(err).Str("role", role).Str("id", id).Msg("failed to marshal payload")
 		return
 	}
 
@@ -151,7 +157,7 @@ func (m *Manager) SendToClient(role, id string, msgType string, payload interfac
 
 	finalMsg, err := json.Marshal(baseMsg)
 	if err != nil {
-		log.Printf("[WebSocket] failed to marshal baseMsg for %s %s: %v", role, id, err)
+		logger.Log.Error().Err(err).Str("role", role).Str("id", id).Msg("failed to marshal baseMsg")
 		return
 	}
 
@@ -166,9 +172,9 @@ func (m *Manager) SendToClient(role, id string, msgType string, payload interfac
 	for client := range clientsForID {
 		select {
 		case client.Send <- finalMsg:
-			log.Printf("[WebSocket] Queued %s to %s %s (chan %d/%d)", msgType, role, id, len(client.Send), cap(client.Send))
+			logger.Log.Debug().Str("msg_type", msgType).Str("role", role).Str("id", id).Int("chan_len", len(client.Send)).Int("chan_cap", cap(client.Send)).Msg("Queued to client")
 		default:
-			log.Printf("[WebSocket] WARNING: Send channel full for %s %s, dropping %s message!", role, id, msgType)
+			logger.Log.Warn().Str("role", role).Str("id", id).Str("msg_type", msgType).Msg("Send channel full, dropping message")
 		}
 	}
 }
@@ -197,12 +203,18 @@ func (m *Manager) SetActiveRide(driverID, rideID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.activeDriverRide[driverID] = rideID
+	if m.LocStore != nil {
+		m.LocStore.SetDriverStatus(driverID, "BUSY")
+	}
 }
 
 func (m *Manager) ClearActiveRide(driverID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.activeDriverRide, driverID)
+	if m.LocStore != nil {
+		m.LocStore.SetDriverStatus(driverID, "AVAILABLE")
+	}
 }
 
 // HandleIncomingMessage parses messages sent from a client to the server
@@ -214,7 +226,7 @@ func (m *Manager) HandleIncomingMessage(client *Client, message []byte) {
 
 	var baseMsg BaseMessage
 	if err := json.Unmarshal(message, &baseMsg); err != nil {
-		log.Printf("[WebSocket] Error parsing message from %s %s: %v", client.Role, client.ID, err)
+		logger.Log.Error().Err(err).Str("role", client.Role).Str("id", client.ID).Msg("Error parsing message")
 		return
 	}
 
@@ -226,7 +238,7 @@ func (m *Manager) HandleIncomingMessage(client *Client, message []byte) {
 			RideID string `json:"ride_id"`
 		}
 		if err := json.Unmarshal(baseMsg.Payload, &payload); err != nil || payload.RideID == "" {
-			log.Printf("[WebSocket] Invalid WATCH_RIDE from %s %s", client.Role, client.ID)
+			logger.Log.Warn().Str("role", client.Role).Str("id", client.ID).Msg("Invalid WATCH_RIDE")
 			return
 		}
 		m.mu.Lock()
@@ -240,7 +252,7 @@ func (m *Manager) HandleIncomingMessage(client *Client, message []byte) {
 			RideID string `json:"ride_id"`
 		}
 		if err := json.Unmarshal(baseMsg.Payload, &payload); err != nil || payload.RideID == "" {
-			log.Printf("[WebSocket] Invalid RIDE_DECLINED from %s %s", client.Role, client.ID)
+			logger.Log.Warn().Str("role", client.Role).Str("id", client.ID).Msg("Invalid RIDE_DECLINED")
 			return
 		}
 		if m.DeclineHandler != nil {
@@ -249,6 +261,6 @@ func (m *Manager) HandleIncomingMessage(client *Client, message []byte) {
 	case "PING":
 		// Ignore ping messages
 	default:
-		log.Printf("[WebSocket] Unknown event type '%s' from %s %s", baseMsg.Type, client.Role, client.ID)
+		logger.Log.Warn().Str("type", baseMsg.Type).Str("role", client.Role).Str("id", client.ID).Msg("Unknown event type")
 	}
 }

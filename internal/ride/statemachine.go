@@ -15,7 +15,7 @@ func ValidateTransition(current RideStatus, next RideStatus) error {
 			return nil
 		}
 	case StatusArrived:
-		if next == StatusInProgress {
+		if next == StatusInProgress || next == StatusCancelled {
 			return nil
 		}
 	case StatusInProgress:

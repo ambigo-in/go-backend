@@ -10,11 +10,13 @@ import (
 
 type Store struct {
 	ambulanceTypes *mongo.Collection
+	admins         *mongo.Collection
 }
 
-func NewStore(db *mongo.Database) *Store {
+func NewStore(dataDB, usersDB *mongo.Database) *Store {
 	return &Store{
-		ambulanceTypes: db.Collection("ambulance_type"),
+		ambulanceTypes: dataDB.Collection("ambulance_type"),
+		admins:         usersDB.Collection("admin"),
 	}
 }
 
@@ -61,4 +63,28 @@ func (s *Store) GetAmbulanceTypeByID(ctx context.Context, idStr string) (*Ambula
 func (s *Store) DeleteAmbulanceType(ctx context.Context, id primitive.ObjectID) error {
 	_, err := s.ambulanceTypes.DeleteOne(ctx, bson.M{"_id": id})
 	return err
+}
+
+func (s *Store) FindAdminByUsername(ctx context.Context, username string) (*Admin, error) {
+	var admin Admin
+	err := s.admins.FindOne(ctx, bson.M{"username": username}).Decode(&admin)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &admin, nil
+}
+
+func (s *Store) FindAdminByMobile(ctx context.Context, mobile string) (*Admin, error) {
+	var admin Admin
+	err := s.admins.FindOne(ctx, bson.M{"mobile": mobile}).Decode(&admin)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &admin, nil
 }

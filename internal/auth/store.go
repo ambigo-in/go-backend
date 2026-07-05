@@ -21,13 +21,13 @@ type Store struct {
 	unverifiedDrivers *mongo.Collection
 }
 
-func NewStore(db *mongo.Database) *Store {
+func NewStore(usersDB, recordsDB *mongo.Database) *Store {
 	return &Store{
-		authOTP:           db.Collection("auth_otp"),
-		users:             db.Collection("users"),
-		drivers:           db.Collection("drivers"),
-		referrals:         db.Collection("referrals"),
-		unverifiedDrivers: db.Collection("unverified_drivers"),
+		authOTP:           usersDB.Collection("auth_otp"),
+		users:             usersDB.Collection("users"),
+		drivers:           usersDB.Collection("drivers"),
+		referrals:         recordsDB.Collection("referrals"),
+		unverifiedDrivers: usersDB.Collection("unverified_drivers"),
 	}
 }
 

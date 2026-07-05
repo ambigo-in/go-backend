@@ -1,13 +1,16 @@
 package eventbus
 
 import (
-	"ambigo-backend/interfaces"
-	"log"
+	"encoding/json"
 	"sync"
+
+	"ambigo-backend/interfaces"
+	"ambigo-backend/internal/logger"
+	"ambigo-backend/internal/metrics"
 )
 
 type InMemoryBus struct {
-	mu         sync.RWMutex
+	mu          sync.RWMutex
 	subscribers map[string][]chan []byte
 }
 
@@ -29,10 +32,20 @@ func (b *InMemoryBus) Publish(channel string, payload []byte) error {
 		select {
 		case ch <- payloadCopy:
 		default:
-			log.Printf("[EventBus] Dropping message on channel %s: subscriber too slow", channel)
+			metrics.EventBusMessagesDropped.WithLabelValues(channel).Inc()
+			logger.Log.Warn().Str("channel", channel).Msg("Dropping message: subscriber too slow")
 		}
 	}
 	return nil
+}
+
+// PublishEvent marshals a struct and publishes it on the given channel.
+func (b *InMemoryBus) PublishEvent(channel string, v interface{}) error {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	return b.Publish(channel, data)
 }
 
 func (b *InMemoryBus) Subscribe(channel string, handler func(payload []byte)) error {
@@ -43,8 +56,20 @@ func (b *InMemoryBus) Subscribe(channel string, handler func(payload []byte)) er
 	b.mu.Unlock()
 
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logger.Log.Error().Interface("panic", r).Str("channel", channel).Msg("Panic in subscriber")
+			}
+		}()
 		for msg := range ch {
-			handler(msg)
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Log.Error().Interface("panic", r).Str("channel", channel).Msg("Panic in subscriber handler")
+					}
+				}()
+				handler(msg)
+			}()
 		}
 	}()
 	return nil

@@ -13,6 +13,7 @@ type WalletTransaction struct {
 	ID                  primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
 	DriverID            string             `bson:"driver_id" json:"driver_id"`
 	ZwitchBeneficiaryID string             `bson:"zwitch_beneficiary_id" json:"zwitch_beneficiary_id"`
+	ZwitchID            string             `bson:"zwitch_id" json:"zwitch_id"`
 	Amount              float64            `bson:"amount" json:"amount"`
 	AccountNo           string             `bson:"account_no" json:"account_no"`
 	MerchantReferenceID string             `bson:"merchant_reference_id" json:"merchant_reference_id"`
@@ -21,6 +22,7 @@ type WalletTransaction struct {
 	Status              string             `bson:"status" json:"status"`
 	ErrorMessage        string             `bson:"error_message" json:"error_message"`
 	CreatedAt           time.Time          `bson:"created_at" json:"created_at"`
+	UpdatedAt           *time.Time         `bson:"updated_at,omitempty" json:"updated_at,omitempty"`
 }
 
 type WalletStore struct {
@@ -30,7 +32,7 @@ type WalletStore struct {
 
 func NewWalletStore(recordsDB *mongo.Database, usersDB *mongo.Database) *WalletStore {
 	return &WalletStore{
-		transactions: recordsDB.Collection("wallet_transactions"),
+		transactions: recordsDB.Collection("wallet"),
 		drivers:      usersDB.Collection("drivers"),
 	}
 }

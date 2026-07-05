@@ -1,8 +1,9 @@
 package location
 
 import (
-	"log"
 	"time"
+
+	"ambigo-backend/internal/logger"
 )
 
 // StartCleanupWorker runs a background goroutine that sweeps the MemoryStore
@@ -36,6 +37,6 @@ func (s *MemoryStore) cleanupStaleDrivers() {
 	}
 
 	if removedCount > 0 {
-		log.Printf("[LocationStore] Cleaned up %d stale drivers", removedCount)
+		logger.Log.Info().Int("count", removedCount).Msg("Cleaned up stale drivers")
 	}
 }

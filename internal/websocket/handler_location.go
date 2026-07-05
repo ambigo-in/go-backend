@@ -3,7 +3,9 @@ package websocket
 import (
 	"context"
 	"encoding/json"
-	"log"
+
+	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/logger"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
@@ -17,14 +19,14 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 
 	var update LocationUpdatePayload
 	if err := json.Unmarshal(payload, &update); err != nil {
-		log.Printf("[WebSocket] Failed to parse LocationUpdate from driver %s: %v", client.ID, err)
+		logger.Log.Error().Err(err).Str("driver_id", client.ID).Msg("Failed to parse LocationUpdate")
 		return
 	}
 
 	// Instantly update the LocationStore (H3 mapping)
 	err := m.LocStore.UpdateLocation(client.ID, update.Lat, update.Lng)
 	if err != nil {
-		log.Printf("[WebSocket] Failed to update location store for driver %s: %v", client.ID, err)
+		logger.Log.Error().Err(err).Str("driver_id", client.ID).Msg("Failed to update location store")
 	}
 
 	// Cache driver's vehicle type on first location ping
@@ -42,12 +44,22 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 	m.mu.RLock()
 	rideID := m.activeDriverRide[client.ID]
 	m.mu.RUnlock()
+
+	// If driver has an active ride but was recreated as AVAILABLE (e.g. after cleanup), fix the status
 	if rideID != "" {
-		m.SendToRideWatchers(rideID, EventLocationUpdate, map[string]float64{
-			"lat":       update.Lat,
-			"lng":       update.Lng,
-			"latitude":  update.Lat,
-			"longitude": update.Lng,
+		currentStatus, _ := m.LocStore.GetDriverStatus(client.ID)
+		if currentStatus != "BUSY" {
+			m.LocStore.SetDriverStatus(client.ID, "BUSY")
+		}
+	}
+
+	// Publish driver location event (subscriber handles onward relay to ride watchers)
+	if m.EventBus != nil {
+		m.EventBus.PublishEvent(eventbus.ChannelDriverLocationUpdate, eventbus.DriverLocationUpdatePayload{
+			DriverID: client.ID,
+			Lat:      update.Lat,
+			Lng:      update.Lng,
+			RideID:   rideID,
 		})
 	}
 }

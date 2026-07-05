@@ -20,7 +20,7 @@ func NewCounterStore(db *mongo.Database) *CounterStore {
 
 func (s *CounterStore) IncrementCounter(ctx context.Context, id string) error {
 	filter := bson.M{"_id": id}
-	update := bson.M{"$inc": bson.M{"count": 1}}
+	update := bson.M{"$inc": bson.M{"value": 1}}
 	opts := options.Update().SetUpsert(true)
 	_, err := s.counters.UpdateOne(ctx, filter, update, opts)
 	return err
@@ -29,7 +29,7 @@ func (s *CounterStore) IncrementCounter(ctx context.Context, id string) error {
 func (s *CounterStore) GetCounter(ctx context.Context, id string) (int, error) {
 	filter := bson.M{"_id": id}
 	var result struct {
-		Count int `bson:"count"`
+		Value int `bson:"value"`
 	}
 	err := s.counters.FindOne(ctx, filter).Decode(&result)
 	if err != nil {
@@ -38,5 +38,5 @@ func (s *CounterStore) GetCounter(ctx context.Context, id string) (int, error) {
 		}
 		return 0, err
 	}
-	return result.Count, nil
+	return result.Value, nil
 }

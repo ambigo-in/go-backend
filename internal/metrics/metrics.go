@@ -61,6 +61,11 @@ var (
 		Name: "ambigo_otp_requests_total",
 		Help: "Total number of OTP requests",
 	})
+
+	EventBusMessagesDropped = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ambigo_eventbus_messages_dropped_total",
+		Help: "Number of EventBus messages dropped because subscriber channels were full",
+	}, []string{"channel"})
 )
 
 func ObserveHttpRequest(path, method string, status int, dur time.Duration) {

@@ -4,20 +4,26 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"ambigo-backend/api/response"
 	"ambigo-backend/internal/auth"
-	"ambigo-backend/internal/metrics"
+	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/requestid"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
 type AuthHandler struct {
 	AuthStore *auth.Store
+	EventBus  *eventbus.InMemoryBus
 	JWTSecret string
+	SMSCfg    auth.SMSCountryConfig
 }
 
-func NewAuthHandler(authStore *auth.Store, jwtSecret string) *AuthHandler {
+func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string, smsCfg auth.SMSCountryConfig) *AuthHandler {
 	return &AuthHandler{
 		AuthStore: authStore,
+		EventBus:  eventBus,
 		JWTSecret: jwtSecret,
+		SMSCfg:    smsCfg,
 	}
 }
 
@@ -26,37 +32,43 @@ func NewAuthHandler(authStore *auth.Store, jwtSecret string) *AuthHandler {
 // -----------------------------------------------------
 
 type UserRequestOTPPayload struct {
-	Mobile       string `json:"mobile"`
+	Mobile       string `json:"mobile" validate:"required"`
 	AppSignature string `json:"app_signature,omitempty"`
 }
 
 // HandleUserRequestOTP sends a 6-digit OTP to the user
 func (h *AuthHandler) HandleUserRequestOTP(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
 	var payload UserRequestOTPPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &payload) {
 		return
 	}
 
 	otp, err := h.AuthStore.GenerateAndStoreOTP(r.Context(), payload.Mobile)
 	if err != nil {
-		http.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
+		response.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
 		return
 	}
-	metrics.OtpRequestsTotal.Inc()
+	h.EventBus.PublishEvent(eventbus.ChannelAuthOTPRequested, eventbus.AuthOTPRequestedPayload{
+		Mobile: payload.Mobile, Role: "user", RequestID: reqID,
+	})
 
 	// Send the SMS
-	err = auth.SendSMS(payload.Mobile, otp, payload.AppSignature)
+	err = auth.SendSMS(h.SMSCfg, payload.Mobile, otp, payload.AppSignature)
 	if err != nil {
-		// Log the error but maybe return success in dev mode so we can still test
-		http.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
+		response.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Check if user exists
 	user, err := h.AuthStore.FindUserByMobile(r.Context(), payload.Mobile)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
@@ -74,60 +86,72 @@ func (h *AuthHandler) HandleUserRequestOTP(w http.ResponseWriter, r *http.Reques
 }
 
 type UserVerifyOTPPayload struct {
-	Name         string `json:"name,omitempty"` // Required if new user
-	Mobile       string `json:"mobile"`
-	OTP          string `json:"otp"`
+	Name         string `json:"name,omitempty"`
+	Mobile       string `json:"mobile" validate:"required"`
+	OTP          string `json:"otp" validate:"required"`
 	ReferralCode string `json:"referral_code,omitempty"`
 }
 
 // HandleUserVerifyOTP checks the OTP and issues a JWT token
 func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
 	var payload UserVerifyOTPPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &payload) {
 		return
 	}
 
 	// 1. Verify OTP
 	valid, err := h.AuthStore.VerifyOTP(r.Context(), payload.Mobile, payload.OTP)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	if !valid {
-		http.Error(w, "Invalid OTP", http.StatusUnauthorized)
+		response.Error(w, "Invalid OTP", http.StatusUnauthorized)
 		return
 	}
 
 	// 2. Find or Create User
 	user, err := h.AuthStore.FindUserByMobile(r.Context(), payload.Mobile)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
 	if user == nil {
 		// Create new user
 		if payload.Name == "" {
-			http.Error(w, "Name is required for new users", http.StatusBadRequest)
+			response.Error(w, "Name is required for new users", http.StatusBadRequest)
 			return
 		}
 		user, err = h.AuthStore.CreateUser(r.Context(), payload.Name, payload.Mobile, payload.ReferralCode)
 		if err != nil {
-			http.Error(w, "Failed to create user", http.StatusInternalServerError)
+			response.Error(w, "Failed to create user", http.StatusInternalServerError)
 			return
 		}
+		h.EventBus.PublishEvent(eventbus.ChannelAuthUserRegistered, eventbus.AuthUserRegisteredPayload{
+			UserID: user.ID.Hex(), Mobile: payload.Mobile, Name: payload.Name, RequestID: reqID,
+		})
 	}
 
 	// 3. Generate JWT Token
 	token, err := auth.GenerateJWT(user.ID.Hex(), "user", h.JWTSecret)
 	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
 
 	// 4. Update Token in DB
 	h.AuthStore.UpdateUserJWT(r.Context(), user.ID, token)
+
+	h.EventBus.PublishEvent(eventbus.ChannelAuthUserLoggedIn, eventbus.AuthUserLoggedInPayload{
+		UserID: user.ID.Hex(), Mobile: payload.Mobile, RequestID: reqID,
+	})
 
 	// 5. Return Token
 	w.Header().Set("Content-Type", "application/json")
@@ -142,34 +166,41 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 
 // HandleDriverRequestOTP sends a 6-digit OTP to the driver
 func (h *AuthHandler) HandleDriverRequestOTP(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
 	var payload UserRequestOTPPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &payload) {
 		return
 	}
 
 	otp, err := h.AuthStore.GenerateAndStoreOTP(r.Context(), payload.Mobile)
 	if err != nil {
-		http.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
+		response.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
 		return
 	}
-	metrics.OtpRequestsTotal.Inc()
+	h.EventBus.PublishEvent(eventbus.ChannelAuthOTPRequested, eventbus.AuthOTPRequestedPayload{
+		Mobile: payload.Mobile, Role: "driver", RequestID: reqID,
+	})
 
-	err = auth.SendSMS(payload.Mobile, otp, payload.AppSignature)
+	err = auth.SendSMS(h.SMSCfg, payload.Mobile, otp, payload.AppSignature)
 	if err != nil {
-		http.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
+		response.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	// Check if driver exists
 	driver, err := h.AuthStore.FindDriverByMobile(r.Context(), payload.Mobile)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 	unverifiedDriver, err := h.AuthStore.FindUnverifiedDriverByMobile(r.Context(), payload.Mobile)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
@@ -190,21 +221,26 @@ func (h *AuthHandler) HandleDriverRequestOTP(w http.ResponseWriter, r *http.Requ
 
 // HandleDriverVerifyOTP checks the OTP and issues a JWT token for the driver
 func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
 	var payload UserVerifyOTPPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
-		http.Error(w, "Invalid payload", http.StatusBadRequest)
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &payload) {
 		return
 	}
 
 	valid, err := h.AuthStore.VerifyOTP(r.Context(), payload.Mobile, payload.OTP)
 	if err != nil || !valid {
-		http.Error(w, "Invalid OTP", http.StatusUnauthorized)
+		response.Error(w, "Invalid OTP", http.StatusUnauthorized)
 		return
 	}
 
 	driver, err := h.AuthStore.FindDriverByMobile(r.Context(), payload.Mobile)
 	if err != nil {
-		http.Error(w, "Database error", http.StatusInternalServerError)
+		response.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
 
@@ -216,26 +252,29 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 		role = "unvrf_driver"
 		unverifiedDriver, err := h.AuthStore.FindUnverifiedDriverByMobile(r.Context(), payload.Mobile)
 		if err != nil {
-			http.Error(w, "Database error", http.StatusInternalServerError)
+			response.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
 		if unverifiedDriver == nil {
 			if payload.Name == "" {
-				http.Error(w, "Driver not found. Please sign up first.", http.StatusNotFound)
+				response.Error(w, "Driver not found. Please sign up first.", http.StatusNotFound)
 				return
 			}
 			unverifiedDriver, err = h.AuthStore.CreateUnverifiedDriver(r.Context(), payload.Name, payload.Mobile)
 			if err != nil {
-				http.Error(w, "Failed to create driver", http.StatusInternalServerError)
+				response.Error(w, "Failed to create driver", http.StatusInternalServerError)
 				return
 			}
+			h.EventBus.PublishEvent(eventbus.ChannelAuthDriverCreated, eventbus.AuthDriverCreatedPayload{
+				DriverID: unverifiedDriver.ID.Hex(), Mobile: payload.Mobile, Name: payload.Name, RequestID: reqID,
+			})
 		}
 		driverID = unverifiedDriver.ID
 	}
 
 	token, err := auth.GenerateJWT(driverID.Hex(), role, h.JWTSecret)
 	if err != nil {
-		http.Error(w, "Failed to generate token", http.StatusInternalServerError)
+		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
 	if role == "driver" {
@@ -243,6 +282,10 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 	} else {
 		h.AuthStore.UpdateUnverifiedDriverJWT(r.Context(), driverID, token)
 	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelAuthDriverLoggedIn, eventbus.AuthDriverLoggedInPayload{
+		DriverID: driverID.Hex(), Mobile: payload.Mobile, Role: role, RequestID: reqID,
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
