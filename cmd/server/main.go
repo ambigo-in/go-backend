@@ -115,7 +115,7 @@ func main() {
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, appConfig.RazorpayWebhookSecret)
-	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore, appConfig.JWTSecret)
+	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore, counterStore, rideStore, appConfig.JWTSecret)
 	offerHandler := handlers.NewOfferHandler(offerStore, eventBus)
 	sharedHandler := handlers.NewSharedHandler(cloudshopeService, counterStore, adminStore, hospitalStore)
 	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
@@ -184,9 +184,9 @@ func main() {
 
 	// Shared Endpoints
 	mux.Handle("POST /api/v2/shared/call/mask", jwtAuth(http.HandlerFunc(sharedHandler.HandleCallMask)))
-	mux.Handle("POST /api/v2/shared/updates/ambulance_types/check", jwtAuth(http.HandlerFunc(sharedHandler.HandleCheckAmbulanceUpdates)))
+	mux.Handle("POST /api/v2/shared/updates/ambulance_types/check", http.HandlerFunc(sharedHandler.HandleCheckAmbulanceUpdates))
 	mux.Handle("POST /api/v2/shared/ambulance/types/list", http.HandlerFunc(sharedHandler.HandleListAmbulanceTypes)) // Note: V1 POST without Auth for lists? Actually V1 doesn't have auth for /list.
-	mux.Handle("POST /api/v2/shared/updates/hospitals/check", jwtAuth(http.HandlerFunc(sharedHandler.HandleCheckHospitalUpdates)))
+	mux.Handle("POST /api/v2/shared/updates/hospitals/check", http.HandlerFunc(sharedHandler.HandleCheckHospitalUpdates))
 	mux.Handle("POST /api/v2/shared/hospitals/list", http.HandlerFunc(sharedHandler.HandleListHospitals))
 	mux.Handle("POST /api/v2/shared/feedback/submit", jwtAuth(http.HandlerFunc(feedbackHandler.HandleSubmitFeedback)))
 
@@ -243,8 +243,33 @@ func main() {
 	mux.Handle("POST /api/v2/admin/ambulance_types", requireAdmin(http.HandlerFunc(adminHandler.HandleCreateAmbulanceType)))
 	mux.Handle("GET /api/v2/admin/ambulance_types", requireAdmin(http.HandlerFunc(adminHandler.HandleListAmbulanceTypes)))
 	mux.Handle("DELETE /api/v2/admin/ambulance_types/{id}", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteAmbulanceType)))
-	mux.Handle("POST /api/v2/admin/drivers/approve", requireAdmin(http.HandlerFunc(adminHandler.HandleApproveDriver)))
-	mux.Handle("GET /api/v2/admin/unverified_drivers", requireAdmin(http.HandlerFunc(adminHandler.HandleGetUnverifiedDrivers)))
+	// Admin: Verified Driver CRUD
+	mux.Handle("POST /api/v2/admin/drivers/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListDrivers)))
+	mux.Handle("POST /api/v2/admin/drivers/details", requireAdmin(http.HandlerFunc(adminHandler.HandleGetDriverDetails)))
+	mux.Handle("POST /api/v2/admin/drivers/add", requireAdmin(http.HandlerFunc(adminHandler.HandleAddDriver)))
+	mux.Handle("POST /api/v2/admin/drivers/update", requireAdmin(http.HandlerFunc(adminHandler.HandleUpdateDriver)))
+	mux.Handle("POST /api/v2/admin/drivers/delete", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteDriver)))
+	// Admin: Unverified Driver Flow
+	mux.Handle("POST /api/v2/admin/drivers/unverified/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListUnverifiedDrivers)))
+	mux.Handle("POST /api/v2/admin/drivers/unverified/list/all", requireAdmin(http.HandlerFunc(adminHandler.HandleListAllUnverifiedDrivers)))
+	mux.Handle("POST /api/v2/admin/drivers/unverified/fetch", requireAdmin(http.HandlerFunc(adminHandler.HandleFetchUnverifiedDriver)))
+	mux.Handle("POST /api/v2/admin/drivers/unverified/accept", requireAdmin(http.HandlerFunc(adminHandler.HandleAcceptDriver)))
+	mux.Handle("POST /api/v2/admin/drivers/unverified/reject", requireAdmin(http.HandlerFunc(adminHandler.HandleRejectDriver)))
+	mux.Handle("POST /api/v2/admin/drivers/unverified/counter", requireAdmin(http.HandlerFunc(adminHandler.HandleUnverifiedDriverCounter)))
+	// Admin: Driver Ride History
+	mux.Handle("POST /api/v2/admin/drivers/rides/list", requireAdmin(http.HandlerFunc(adminHandler.HandleDriverRideList)))
+	// Admin: Profile
+	mux.Handle("POST /api/v2/admin/profile/fcm", requireAdmin(http.HandlerFunc(adminHandler.HandleAdminFCMUpdate)))
+	mux.Handle("POST /api/v2/admin/profile/location", requireAdmin(http.HandlerFunc(adminHandler.HandleAdminLocationUpdate)))
+	// Admin: Users
+	mux.Handle("POST /api/v2/admin/users/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListUsers)))
+	// Admin: User Rides
+	mux.Handle("POST /api/v2/admin/rides/user/list", requireAdmin(http.HandlerFunc(adminHandler.HandleUserRideList)))
+	// Admin: Ride Listing
+	mux.Handle("POST /api/v2/admin/rides/completed/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListCompletedRides)))
+	mux.Handle("POST /api/v2/admin/rides/ongoing/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListOngoingRides)))
+	// Admin: Ambulance Type Update
+	mux.Handle("POST /api/v2/admin/ambulance/types/update", requireAdmin(http.HandlerFunc(adminHandler.HandleUpdateAmbulanceType)))
 	mux.Handle("POST /api/v2/admin/hospitals/add", requireAdmin(http.HandlerFunc(adminHandler.HandleAddHospital)))
 	mux.Handle("POST /api/v2/admin/hospitals/update", requireAdmin(http.HandlerFunc(adminHandler.HandleUpdateHospital)))
 	mux.Handle("POST /api/v2/admin/hospitals/delete", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteHospital)))

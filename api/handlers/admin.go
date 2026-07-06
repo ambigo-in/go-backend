@@ -3,13 +3,16 @@ package handlers
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
+	"ambigo-backend/api/middleware"
 	"ambigo-backend/api/response"
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/requestid"
+	"ambigo-backend/internal/ride"
 	"ambigo-backend/internal/translation"
 	"golang.org/x/crypto/bcrypt"
 
@@ -21,15 +24,19 @@ type AdminHandler struct {
 	AuthStore     *auth.Store
 	EventBus      *eventbus.InMemoryBus
 	HospitalStore *admin.HospitalStore
+	CounterStore  *admin.CounterStore
+	RideStore     *ride.Store
 	JWTSecret     string
 }
 
-func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore, jwtSecret string) *AdminHandler {
+func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore, cStore *admin.CounterStore, rStore *ride.Store, jwtSecret string) *AdminHandler {
 	return &AdminHandler{
 		Store:         store,
 		AuthStore:     authStore,
 		EventBus:      eventBus,
 		HospitalStore: hStore,
+		CounterStore:  cStore,
+		RideStore:     rStore,
 		JWTSecret:     jwtSecret,
 	}
 }
@@ -149,6 +156,10 @@ func (h *AdminHandler) HandleAdminMobileVerifyOTP(w http.ResponseWriter, r *http
 		response.Error(w, "Admin not found", http.StatusUnauthorized)
 		return
 	}
+	if !adminUser.Active {
+		response.Error(w, "Account deactivated", http.StatusForbidden)
+		return
+	}
 
 	token, err := auth.GenerateJWT(adminUser.ID.Hex(), "admin", h.JWTSecret)
 	if err != nil {
@@ -226,8 +237,63 @@ func (h *AdminHandler) HandleDeleteAmbulanceType(w http.ResponseWriter, r *http.
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Deleted"})
 }
 
-// HandleApproveDriver flips an unverified driver to a verified driver
-func (h *AdminHandler) HandleApproveDriver(w http.ResponseWriter, r *http.Request) {
+// ---------------------------------------------------------------
+// VERIFIED DRIVERS
+// ---------------------------------------------------------------
+
+// HandleListDrivers returns a paginated list of verified drivers
+func (h *AdminHandler) HandleListDrivers(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Skip int64 `json:"skip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	drivers, total, err := h.AuthStore.ListDrivers(r.Context(), req.Skip)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"total": total,
+		"data":  drivers,
+	})
+}
+
+// HandleGetDriverDetails returns a single verified driver with full details
+func (h *AdminHandler) HandleGetDriverDetails(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(req.ID)
+	if err != nil {
+		response.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if driver == nil {
+		response.Error(w, "Driver not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(driver)
+}
+
+// HandleAddDriver creates a new verified driver
+func (h *AdminHandler) HandleAddDriver(w http.ResponseWriter, r *http.Request) {
 	reqID := requestid.FromContext(r.Context())
 
 	var driver auth.Driver
@@ -235,9 +301,142 @@ func (h *AdminHandler) HandleApproveDriver(w http.ResponseWriter, r *http.Reques
 		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
-	
-	err := h.AuthStore.ApproveDriver(r.Context(), &driver)
+	if !response.Validate(w, &driver) {
+		return
+	}
+
+	if err := h.AuthStore.InsertDriver(r.Context(), &driver); err != nil {
+		response.Error(w, "Failed to add driver", http.StatusInternalServerError)
+		return
+	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelAuthDriverCreated, eventbus.AuthDriverCreatedPayload{
+		DriverID: driver.ID.Hex(), Name: driver.Name, Mobile: driver.Mobile, RequestID: reqID,
+	})
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver added successfully"})
+}
+
+// HandleUpdateDriver updates an existing verified driver
+func (h *AdminHandler) HandleUpdateDriver(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
+	var driver auth.Driver
+	if err := json.NewDecoder(r.Body).Decode(&driver); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if driver.ID.IsZero() {
+		response.Error(w, "ID is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.AuthStore.UpdateDriver(r.Context(), &driver); err != nil {
+		response.Error(w, "Failed to update driver", http.StatusInternalServerError)
+		return
+	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelAuthDriverLoggedIn, eventbus.AuthDriverLoggedInPayload{
+		DriverID: driver.ID.Hex(), Mobile: driver.Mobile, RequestID: reqID,
+	})
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver updated successfully"})
+}
+
+// HandleDeleteDriver removes a verified driver
+func (h *AdminHandler) HandleDeleteDriver(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(req.ID)
 	if err != nil {
+		response.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.AuthStore.DeleteDriver(r.Context(), objID); err != nil {
+		response.Error(w, "Failed to delete driver", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver deleted successfully"})
+}
+
+// ---------------------------------------------------------------
+// UNVERIFIED DRIVERS
+// ---------------------------------------------------------------
+
+// HandleListUnverifiedDrivers returns drivers pending approval
+func (h *AdminHandler) HandleListUnverifiedDrivers(w http.ResponseWriter, r *http.Request) {
+	drivers, err := h.AuthStore.ListUnverifiedDrivers(r.Context())
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(drivers)
+}
+
+// HandleListAllUnverifiedDrivers returns all unverified drivers (including rejected/in-progress)
+func (h *AdminHandler) HandleListAllUnverifiedDrivers(w http.ResponseWriter, r *http.Request) {
+	drivers, err := h.AuthStore.ListAllUnverifiedDrivers(r.Context())
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(drivers)
+}
+
+// HandleFetchUnverifiedDriver returns a single unverified driver
+func (h *AdminHandler) HandleFetchUnverifiedDriver(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(req.ID)
+	if err != nil {
+		response.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	driver, err := h.AuthStore.FindUnverifiedDriverByID(r.Context(), objID)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if driver == nil {
+		response.Error(w, "Driver not found", http.StatusNotFound)
+		return
+	}
+
+	json.NewEncoder(w).Encode(driver)
+}
+
+// HandleAcceptDriver approves an unverified driver, moving them to verified drivers
+func (h *AdminHandler) HandleAcceptDriver(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
+	var driver auth.Driver
+	if err := json.NewDecoder(r.Body).Decode(&driver); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if driver.ID.IsZero() {
+		response.Error(w, "Driver ID is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.AuthStore.ApproveDriver(r.Context(), &driver); err != nil {
 		response.Error(w, "Failed to approve driver: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -249,12 +448,222 @@ func (h *AdminHandler) HandleApproveDriver(w http.ResponseWriter, r *http.Reques
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver Approved"})
 }
 
-// HandleGetUnverifiedDrivers returns a list of drivers waiting for approval
-func (h *AdminHandler) HandleGetUnverifiedDrivers(w http.ResponseWriter, r *http.Request) {
-	// Normally we would have an AuthStore method for this, we'll mock it for brevity.
-	// We'll leave it as an empty array for the prototype.
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode([]interface{}{})
+// HandleRejectDriver sets the error message on an unverified driver
+func (h *AdminHandler) HandleRejectDriver(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		DriverID     string `json:"driver_id" validate:"required"`
+		ErrorMessage string `json:"error_message"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(req.DriverID)
+	if err != nil {
+		response.Error(w, "Invalid ID", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.AuthStore.RejectUnverifiedDriver(r.Context(), objID, req.ErrorMessage); err != nil {
+		response.Error(w, "Failed to reject driver", http.StatusInternalServerError)
+		return
+	}
+
+	h.CounterStore.IncrementCounter(r.Context(), "unverified_drivers")
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver Rejected"})
+}
+
+// HandleUnverifiedDriverCounter returns the current count of unverified drivers
+func (h *AdminHandler) HandleUnverifiedDriverCounter(w http.ResponseWriter, r *http.Request) {
+	count, err := h.CounterStore.GetCounter(r.Context(), "unverified_drivers")
+	if err != nil {
+		response.Error(w, "Error fetching counter", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(strconv.Itoa(count))
+}
+
+// ---------------------------------------------------------------
+// DRIVER RIDE HISTORY
+// ---------------------------------------------------------------
+
+// HandleDriverRideList returns the ride history for a specific driver
+func (h *AdminHandler) HandleDriverRideList(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	rides, err := h.RideStore.GetRideHistory(r.Context(), req.ID, "driver", 100, 0)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(rides)
+}
+
+// ---------------------------------------------------------------
+// ADMIN PROFILE
+// ---------------------------------------------------------------
+
+// HandleAdminFCMUpdate updates the admin's FCM token
+func (h *AdminHandler) HandleAdminFCMUpdate(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		FCMToken string `json:"fcm_token" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	adminIDStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	objID, err := primitive.ObjectIDFromHex(adminIDStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	if err := h.Store.UpdateAdminFCM(r.Context(), objID, req.FCMToken); err != nil {
+		response.Error(w, "Failed to update FCM token", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "FCM token updated"})
+}
+
+// HandleAdminLocationUpdate updates the admin's location
+func (h *AdminHandler) HandleAdminLocationUpdate(w http.ResponseWriter, r *http.Request) {
+	var loc admin.GeoJSON
+	if err := json.NewDecoder(r.Body).Decode(&loc); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	adminIDStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	objID, err := primitive.ObjectIDFromHex(adminIDStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	if err := h.Store.UpdateAdminLocation(r.Context(), objID, &loc); err != nil {
+		response.Error(w, "Failed to update location", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Location updated"})
+}
+
+// ---------------------------------------------------------------
+// USERS
+// ---------------------------------------------------------------
+
+// HandleListUsers returns all registered users
+func (h *AdminHandler) HandleListUsers(w http.ResponseWriter, r *http.Request) {
+	users, err := h.AuthStore.ListUsers(r.Context())
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(users)
+}
+
+// ---------------------------------------------------------------
+// USER RIDE HISTORY
+// ---------------------------------------------------------------
+
+// HandleUserRideList returns the ride history for a specific user
+func (h *AdminHandler) HandleUserRideList(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+
+	rides, err := h.RideStore.GetRideHistory(r.Context(), req.ID, "user", 100, 0)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(rides)
+}
+
+// ---------------------------------------------------------------
+// RIDE LISTING (completed / ongoing)
+// ---------------------------------------------------------------
+
+type rideStatusFilter struct {
+	Status ride.RideStatus `json:"status"`
+}
+
+// HandleListCompletedRides returns all completed rides
+func (h *AdminHandler) HandleListCompletedRides(w http.ResponseWriter, r *http.Request) {
+	rides, err := h.RideStore.ListRidesByStatus(r.Context(), []ride.RideStatus{ride.StatusCompleted}, 100, 0)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(rides)
+}
+
+// HandleListOngoingRides returns all currently active rides (ASSIGNED, ARRIVED, IN_PROGRESS)
+func (h *AdminHandler) HandleListOngoingRides(w http.ResponseWriter, r *http.Request) {
+	rides, err := h.RideStore.ListRidesByStatus(r.Context(), []ride.RideStatus{ride.StatusAssigned, ride.StatusArrived, ride.StatusInProgress}, 100, 0)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(rides)
+}
+
+// ---------------------------------------------------------------
+// AMBULANCE TYPE UPDATE
+// ---------------------------------------------------------------
+
+// HandleUpdateAmbulanceType updates an existing ambulance type
+func (h *AdminHandler) HandleUpdateAmbulanceType(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
+	var amb admin.AmbulanceType
+	if err := json.NewDecoder(r.Body).Decode(&amb); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if amb.ID.IsZero() {
+		response.Error(w, "ID is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.Store.UpdateAmbulanceType(r.Context(), &amb); err != nil {
+		response.Error(w, "Failed to update ambulance type", http.StatusInternalServerError)
+		return
+	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelAdminAmbTypeCreated, eventbus.AdminAmbTypePayload{
+		AmbTypeID: amb.ID.Hex(), Name: amb.Name, RequestID: reqID,
+	})
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Ambulance type updated"})
 }
 
 // -------------------------

@@ -196,6 +196,27 @@ func (s *Store) CancelStaleSearchingRides(ctx context.Context, maxAge time.Durat
 	return result.ModifiedCount, nil
 }
 
+// ListRidesByStatus returns a paginated list of rides matching one of the given statuses
+func (s *Store) ListRidesByStatus(ctx context.Context, statuses []RideStatus, limit, skip int64) ([]*Ride, error) {
+	filter := bson.M{"status": bson.M{"$in": statuses}}
+	opts := options.Find().SetSort(bson.M{"time.created_at": -1}).SetSkip(skip).SetLimit(limit)
+
+	cursor, err := s.collection.Find(ctx, filter, opts)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var rides []*Ride
+	if err = cursor.All(ctx, &rides); err != nil {
+		return nil, err
+	}
+	if rides == nil {
+		rides = []*Ride{}
+	}
+	return rides, nil
+}
+
 // GetCurrentRide returns the currently active ride (if any) for a user or driver
 func (s *Store) GetCurrentRide(ctx context.Context, entityID string, role string) (*Ride, error) {
 	var filter bson.M

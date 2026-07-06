@@ -60,6 +60,11 @@ func (s *Store) GetAmbulanceTypeByID(ctx context.Context, idStr string) (*Ambula
 	return &amb, nil
 }
 
+func (s *Store) UpdateAmbulanceType(ctx context.Context, amb *AmbulanceType) error {
+	_, err := s.ambulanceTypes.ReplaceOne(ctx, bson.M{"_id": amb.ID}, amb)
+	return err
+}
+
 func (s *Store) DeleteAmbulanceType(ctx context.Context, id primitive.ObjectID) error {
 	_, err := s.ambulanceTypes.DeleteOne(ctx, bson.M{"_id": id})
 	return err
@@ -87,4 +92,26 @@ func (s *Store) FindAdminByMobile(ctx context.Context, mobile string) (*Admin, e
 		return nil, err
 	}
 	return &admin, nil
+}
+
+func (s *Store) FindAdminByID(ctx context.Context, id primitive.ObjectID) (*Admin, error) {
+	var admin Admin
+	err := s.admins.FindOne(ctx, bson.M{"_id": id}).Decode(&admin)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &admin, nil
+}
+
+func (s *Store) UpdateAdminFCM(ctx context.Context, id primitive.ObjectID, fcmToken string) error {
+	_, err := s.admins.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"fcm_token": fcmToken}})
+	return err
+}
+
+func (s *Store) UpdateAdminLocation(ctx context.Context, id primitive.ObjectID, location *GeoJSON) error {
+	_, err := s.admins.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"location": location}})
+	return err
 }

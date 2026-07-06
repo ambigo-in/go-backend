@@ -244,18 +244,29 @@ func (s *Store) UpdateUnverifiedDriverFCM(ctx context.Context, id primitive.Obje
 // UpdateUnverifiedDriver details handles the initial onboarding upload flow
 func (s *Store) UpdateUnverifiedDriver(ctx context.Context, driver *UnverifiedDriver) error {
 	filter := bson.M{"_id": driver.ID}
-	update := bson.M{
-		"$set": bson.M{
-			"portrait_image": driver.PortraitImage,
-			"poi_image":      driver.POIImage,
-			"dl_image":       driver.DLImage,
-			"rc_image":       driver.RCImage,
-			"amb_front":      driver.AmbFront,
-			"amb_inside":     driver.AmbInside,
-			"under_progress": true,
-			"error_message":  nil, // Clear any previous rejection message
-		},
+	setFields := bson.M{
+		"under_progress": true,
+		"error_message":  nil,
 	}
+	if driver.PortraitImage != "" {
+		setFields["portrait_image"] = driver.PortraitImage
+	}
+	if driver.POIImage != "" {
+		setFields["poi_image"] = driver.POIImage
+	}
+	if driver.DLImage != "" {
+		setFields["dl_image"] = driver.DLImage
+	}
+	if driver.RCImage != "" {
+		setFields["rc_image"] = driver.RCImage
+	}
+	if driver.AmbFront != "" {
+		setFields["amb_front"] = driver.AmbFront
+	}
+	if driver.AmbInside != "" {
+		setFields["amb_inside"] = driver.AmbInside
+	}
+	update := bson.M{"$set": setFields}
 	opts := options.Update().SetUpsert(true)
 	_, err := s.unverifiedDrivers.UpdateOne(ctx, filter, update, opts)
 	return err
@@ -271,5 +282,110 @@ func (s *Store) ApproveDriver(ctx context.Context, driver *Driver) error {
 
 	// 2. Delete from unverified pool
 	_, err = s.unverifiedDrivers.DeleteOne(ctx, bson.M{"_id": driver.ID})
+	return err
+}
+
+// ListDrivers returns a paginated list of verified drivers sorted by newest first
+func (s *Store) ListDrivers(ctx context.Context, skip int64) ([]Driver, int64, error) {
+	total, err := s.drivers.CountDocuments(ctx, bson.M{})
+	if err != nil {
+		return nil, 0, err
+	}
+
+	opts := options.Find().SetSkip(skip).SetLimit(20).SetSort(bson.M{"_id": -1})
+	cursor, err := s.drivers.Find(ctx, bson.M{}, opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer cursor.Close(ctx)
+
+	var drivers []Driver
+	if err = cursor.All(ctx, &drivers); err != nil {
+		return nil, 0, err
+	}
+	if drivers == nil {
+		drivers = []Driver{}
+	}
+	return drivers, total, nil
+}
+
+// InsertDriver creates a new verified driver
+func (s *Store) InsertDriver(ctx context.Context, driver *Driver) error {
+	driver.ID = primitive.NewObjectID()
+	_, err := s.drivers.InsertOne(ctx, driver)
+	return err
+}
+
+// UpdateDriver replaces an existing verified driver document
+func (s *Store) UpdateDriver(ctx context.Context, driver *Driver) error {
+	_, err := s.drivers.ReplaceOne(ctx, bson.M{"_id": driver.ID}, driver)
+	return err
+}
+
+// DeleteDriver removes a verified driver by ObjectID
+func (s *Store) DeleteDriver(ctx context.Context, id primitive.ObjectID) error {
+	_, err := s.drivers.DeleteOne(ctx, bson.M{"_id": id})
+	return err
+}
+
+// ListUnverifiedDrivers returns unverified drivers under progress (pending review)
+func (s *Store) ListUnverifiedDrivers(ctx context.Context) ([]UnverifiedDriver, error) {
+	cursor, err := s.unverifiedDrivers.Find(ctx, bson.M{"under_progress": true})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var drivers []UnverifiedDriver
+	if err = cursor.All(ctx, &drivers); err != nil {
+		return nil, err
+	}
+	if drivers == nil {
+		drivers = []UnverifiedDriver{}
+	}
+	return drivers, nil
+}
+
+// ListAllUnverifiedDrivers returns all unverified drivers including pending, rejected, and in-progress
+func (s *Store) ListAllUnverifiedDrivers(ctx context.Context) ([]UnverifiedDriver, error) {
+	cursor, err := s.unverifiedDrivers.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var drivers []UnverifiedDriver
+	if err = cursor.All(ctx, &drivers); err != nil {
+		return nil, err
+	}
+	if drivers == nil {
+		drivers = []UnverifiedDriver{}
+	}
+	return drivers, nil
+}
+
+// ListUsers returns all registered users sorted by newest first
+func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	cursor, err := s.users.Find(ctx, bson.M{}, options.Find().SetSort(bson.M{"_id": -1}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var users []User
+	if err = cursor.All(ctx, &users); err != nil {
+		return nil, err
+	}
+	if users == nil {
+		users = []User{}
+	}
+	return users, nil
+}
+
+// RejectUnverifiedDriver sets the error_message and clears under_progress flag
+func (s *Store) RejectUnverifiedDriver(ctx context.Context, id primitive.ObjectID, errorMessage string) error {
+	_, err := s.unverifiedDrivers.UpdateOne(ctx, bson.M{"_id": id}, bson.M{
+		"$set": bson.M{"under_progress": false, "error_message": errorMessage},
+	})
 	return err
 }
