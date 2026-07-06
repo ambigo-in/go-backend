@@ -100,11 +100,12 @@ type RideCompletedPayload struct {
 
 // RideCancelledPayload is published when a ride is cancelled
 type RideCancelledPayload struct {
-	RideID    string `json:"ride_id"`
-	Reason    string `json:"reason"`
-	UserID    string `json:"user_id,omitempty"`
-	DriverID  string `json:"driver_id,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
+	RideID        string   `json:"ride_id"`
+	Reason        string   `json:"reason"`
+	UserID        string   `json:"user_id,omitempty"`
+	DriverID      string   `json:"driver_id,omitempty"`
+	RequestID     string   `json:"request_id,omitempty"`
+	AvailableTypes []string `json:"available_types,omitempty"`
 }
 
 // AuthOTPRequestedPayload is published when an OTP is sent

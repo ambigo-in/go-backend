@@ -92,7 +92,13 @@ func main() {
 	
 	routeClient := dispatch.NewRouteClient(appConfig.GoogleMapsAPIKey, appConfig.GoogleRoutesAPIURL)
 	fcmClient := notification.NewFCMClient(context.Background(), appConfig.FirebaseCredentialsPath)
-	matcher := dispatch.NewMatcher(locationStore, routeClient)
+
+	ambTypes, _ := adminStore.ListAmbulanceTypes(context.Background())
+	ambTypeNames := make(map[string]string, len(ambTypes))
+	for _, t := range ambTypes {
+		ambTypeNames[t.ID.Hex()] = t.Name
+	}
+	matcher := dispatch.NewMatcher(locationStore, routeClient, ambTypeNames)
 	dispatcher := dispatch.NewDispatcher(matcher, rideStore, eventBus, wsManager)
 	dispatcher.StartStaleRideCleanup()
 

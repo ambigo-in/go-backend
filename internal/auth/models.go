@@ -78,6 +78,16 @@ type UnverifiedDriver struct {
 	Location           *GeoJSONPoint      `bson:"location,omitempty" json:"location,omitempty"`
 }
 
+// VerificationUpdateRequest contains only document image fields sent by the driver app
+type VerificationUpdateRequest struct {
+	PortraitImage string `json:"portrait_image"`
+	POIImage      string `json:"poi_image"`
+	DLImage       string `json:"dl_image"`
+	RCImage       string `json:"rc_image"`
+	AmbFront      string `json:"amb_front"`
+	AmbInside     string `json:"amb_inside"`
+}
+
 // AuthOTP represents a temporary OTP request
 type AuthOTP struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
