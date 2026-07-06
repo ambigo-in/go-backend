@@ -111,17 +111,18 @@ func main() {
 
 	// Initialize Handlers
 	rideHandler := handlers.NewRideHandler(dispatcher, eventBus, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore)
-	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, auth.SMSCountryConfig{
+	smsCfg := auth.SMSCountryConfig{
 		APIKey:     os.Getenv("SMS_COUNTRY_KEY"),
 		APIToken:   os.Getenv("SMS_COUNTRY_TOKEN"),
 		APIBaseURL: appConfig.SMSAPIBaseURL,
 		SenderID:   appConfig.SMSSenderID,
 		CC:         appConfig.SMSCC,
-	})
+	}
+	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg)
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, appConfig.RazorpayWebhookSecret)
-	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore, counterStore, rideStore, appConfig.JWTSecret)
+	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore, counterStore, rideStore, appConfig.JWTSecret, smsCfg)
 	offerHandler := handlers.NewOfferHandler(offerStore, eventBus)
 	sharedHandler := handlers.NewSharedHandler(cloudshopeService, counterStore, adminStore, hospitalStore)
 	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
