@@ -285,14 +285,16 @@ func (s *Store) ApproveDriver(ctx context.Context, driver *Driver) error {
 	return err
 }
 
-// ListDrivers returns a paginated list of verified drivers sorted by newest first
+// ListDrivers returns a paginated list of verified drivers sorted by newest first.
+// Excludes heavy image fields (photo, details) — fetched separately on detail screen.
 func (s *Store) ListDrivers(ctx context.Context, skip int64) ([]Driver, int64, error) {
 	total, err := s.drivers.CountDocuments(ctx, bson.M{})
 	if err != nil {
 		return nil, 0, err
 	}
 
-	opts := options.Find().SetSkip(skip).SetLimit(20).SetSort(bson.M{"_id": -1})
+	projection := bson.D{{Key: "photo", Value: 0}, {Key: "details", Value: 0}}
+	opts := options.Find().SetSkip(skip).SetLimit(20).SetSort(bson.M{"_id": -1}).SetProjection(projection)
 	cursor, err := s.drivers.Find(ctx, bson.M{}, opts)
 	if err != nil {
 		return nil, 0, err
@@ -328,9 +330,19 @@ func (s *Store) DeleteDriver(ctx context.Context, id primitive.ObjectID) error {
 	return err
 }
 
-// ListUnverifiedDrivers returns unverified drivers under progress (pending review)
+// ListUnverifiedDrivers returns unverified drivers under progress (pending review).
+// Excludes heavy image fields — fetched separately on detail screen.
 func (s *Store) ListUnverifiedDrivers(ctx context.Context) ([]UnverifiedDriver, error) {
-	cursor, err := s.unverifiedDrivers.Find(ctx, bson.M{"under_progress": true})
+	projection := bson.D{
+		{Key: "portrait_image", Value: 0},
+		{Key: "poi_image", Value: 0},
+		{Key: "dl_image", Value: 0},
+		{Key: "rc_image", Value: 0},
+		{Key: "amb_front", Value: 0},
+		{Key: "amb_inside", Value: 0},
+	}
+	opts := options.Find().SetProjection(projection)
+	cursor, err := s.unverifiedDrivers.Find(ctx, bson.M{"under_progress": true}, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -346,9 +358,19 @@ func (s *Store) ListUnverifiedDrivers(ctx context.Context) ([]UnverifiedDriver, 
 	return drivers, nil
 }
 
-// ListAllUnverifiedDrivers returns all unverified drivers including pending, rejected, and in-progress
+// ListAllUnverifiedDrivers returns all unverified drivers including pending, rejected, and in-progress.
+// Excludes heavy image fields — fetched separately on detail screen.
 func (s *Store) ListAllUnverifiedDrivers(ctx context.Context) ([]UnverifiedDriver, error) {
-	cursor, err := s.unverifiedDrivers.Find(ctx, bson.M{})
+	projection := bson.D{
+		{Key: "portrait_image", Value: 0},
+		{Key: "poi_image", Value: 0},
+		{Key: "dl_image", Value: 0},
+		{Key: "rc_image", Value: 0},
+		{Key: "amb_front", Value: 0},
+		{Key: "amb_inside", Value: 0},
+	}
+	opts := options.Find().SetProjection(projection)
+	cursor, err := s.unverifiedDrivers.Find(ctx, bson.M{}, opts)
 	if err != nil {
 		return nil, err
 	}
