@@ -66,19 +66,32 @@ func (h *VerificationHandler) HandleUpdateVerification(w http.ResponseWriter, r 
 	uidStr, _ := r.Context().Value(middleware.UserIDKey).(string)
 	objID, _ := primitive.ObjectIDFromHex(uidStr)
 
-	var payload auth.UnverifiedDriver
-	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+	var req auth.VerificationUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
 	}
-	if !response.Validate(w, &payload) {
+
+	driver, err := h.AuthStore.FindUnverifiedDriverByID(r.Context(), objID)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if driver == nil {
+		response.Error(w, "Driver not found", http.StatusNotFound)
 		return
 	}
 
-	// We must ensure we apply this to the current user
-	payload.ID = objID
+	driver.PortraitImage = req.PortraitImage
+	driver.POIImage = req.POIImage
+	driver.DLImage = req.DLImage
+	driver.RCImage = req.RCImage
+	driver.AmbFront = req.AmbFront
+	driver.AmbInside = req.AmbInside
+	driver.UnderProgress = true
+	driver.ErrorMessage = nil
 
-	err := h.AuthStore.UpdateUnverifiedDriver(r.Context(), &payload)
+	err = h.AuthStore.UpdateUnverifiedDriver(r.Context(), driver)
 	if err != nil {
 		response.Error(w, "Failed to update driver details", http.StatusInternalServerError)
 		return

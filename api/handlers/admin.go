@@ -27,9 +27,10 @@ type AdminHandler struct {
 	CounterStore  *admin.CounterStore
 	RideStore     *ride.Store
 	JWTSecret     string
+	SMSCfg        auth.SMSCountryConfig
 }
 
-func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore, cStore *admin.CounterStore, rStore *ride.Store, jwtSecret string) *AdminHandler {
+func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore, cStore *admin.CounterStore, rStore *ride.Store, jwtSecret string, smsCfg auth.SMSCountryConfig) *AdminHandler {
 	return &AdminHandler{
 		Store:         store,
 		AuthStore:     authStore,
@@ -38,6 +39,7 @@ func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventb
 		CounterStore:  cStore,
 		RideStore:     rStore,
 		JWTSecret:     jwtSecret,
+		SMSCfg:        smsCfg,
 	}
 }
 
@@ -116,11 +118,17 @@ func (h *AdminHandler) HandleAdminMobileRequestOTP(w http.ResponseWriter, r *htt
 
 	otp, err := h.AuthStore.GenerateAndStoreOTP(r.Context(), req.Mobile)
 	if err != nil {
-		response.Error(w, "Failed to send OTP", http.StatusInternalServerError)
+		response.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
 		return
 	}
 
-	logger.Log.Info().Str("mobile", req.Mobile).Str("otp", otp).Msg("Admin OTP sent")
+	if err := auth.SendSMS(h.SMSCfg, req.Mobile, otp, ""); err != nil {
+		logger.Log.Error().Err(err).Str("mobile", req.Mobile).Msg("Admin OTP SMS send failed")
+		response.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	logger.Log.Info().Str("mobile", req.Mobile).Msg("Admin OTP sent via SMS")
 	json.NewEncoder(w).Encode(map[string]string{"detail": "OTP sent"})
 }
 

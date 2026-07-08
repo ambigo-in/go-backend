@@ -97,9 +97,14 @@ func (n *WSNotifier) handleRideCancelled(payload []byte) {
 	msg := map[string]string{"ride_id": p.RideID, "status": "CANCELLED"}
 	n.wsManager.SendToRideWatchers(p.RideID, "RIDE_UPDATE", msg)
 	if p.Reason == "no_drivers" || p.Reason == "all_drivers_exhausted" {
-		n.wsManager.SendToClient("user", p.UserID, "ERROR", map[string]string{
-			"message": "All nearby drivers are busy. Please try again.",
-		})
+		errPayload := map[string]interface{}{
+			"message":         "All nearby drivers are busy. Please try again.",
+			"available_types": p.AvailableTypes,
+		}
+		if len(p.AvailableTypes) == 0 {
+			errPayload["available_types"] = []string{}
+		}
+		n.wsManager.SendToClient("user", p.UserID, "ERROR", errPayload)
 	}
 }
 
