@@ -1,0 +1,45 @@
+# This file specifies files that should NOT be uploaded to Google Cloud
+# when using gcloud commands.
+
+# If you would like to add entries to this file, you can add a custom
+# section starting after the "DO NOT EDIT" marker below.
+
+# Directories you typically don't want to upload
+node_modules/
+.git/
+.gitignore
+.vscode/
+.idea/
+*.iml
+
+# Local development files
+.env
+.env.local
+.env.*.local
+.DS_Store
+
+# Temporary files
+*.swp
+*.swo
+*~
+*.log
+
+# Build artifacts (usually not needed in Cloud Run)
+bin/
+dist/
+build/
+
+# Test files and coverage
+*_test.go
+coverage/
+*.out
+
+# IDE files
+.vscode/
+.idea/
+*.iml
+*.sublime-project
+*.sublime-workspace
+
+# Development docker files
+docker-compose.dev.yml
