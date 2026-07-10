@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/logger"
 )
 
 type ZwitchService struct {
@@ -91,7 +93,9 @@ func (s *ZwitchService) CreateBeneficiary(acc *auth.WalletDetails, driverID stri
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return "", fmt.Errorf("zwitch create beneficiary failed: %d", resp.StatusCode)
+		respBody, _ := io.ReadAll(resp.Body)
+		logger.Log.Error().Int("status", resp.StatusCode).Str("body", string(respBody)).Msg("Zwitch create beneficiary failed")
+		return "", fmt.Errorf("zwitch create beneficiary failed: %d - %s", resp.StatusCode, string(respBody))
 	}
 
 	var data map[string]interface{}

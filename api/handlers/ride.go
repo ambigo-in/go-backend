@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math/rand"
@@ -47,6 +48,23 @@ func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemory
 		PricingEngine:   pricing.NewEngine(),
 		WalletStore:     walletStore,
 	}
+}
+
+// upgradeUnvrfDriverRole checks if an unverified driver has been promoted to verified.
+// If so, returns "driver" so they can query rides without re-logging in.
+func (h *RideHandler) upgradeUnvrfDriverRole(uidStr, role string) string {
+	if role != "unvrf_driver" {
+		return role
+	}
+	objID, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		return role
+	}
+	found, err := h.AuthStore.FindDriverByID(context.Background(), objID)
+	if err == nil && found != nil {
+		return "driver"
+	}
+	return role
 }
 
 func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) {
@@ -481,6 +499,7 @@ func (h *RideHandler) HandleGetHistory(w http.ResponseWriter, r *http.Request) {
 		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	role = h.upgradeUnvrfDriverRole(uidStr, role)
 
 	limit, _ := strconv.ParseInt(r.URL.Query().Get("limit"), 10, 64)
 	if limit <= 0 {
@@ -509,6 +528,7 @@ func (h *RideHandler) HandleGetCurrentRide(w http.ResponseWriter, r *http.Reques
 		response.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
+	role = h.upgradeUnvrfDriverRole(uidStr, role)
 
 	var req struct {
 		RideID string `json:"ride_id"`
