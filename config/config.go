@@ -12,6 +12,8 @@ type AppConfig struct {
 	JWTSecret         string
 	JWTAlgorithm      string
 	JWTValidityMs     int
+	JWTAudience       string
+	JWTIssuer         string
 	APIKey            string
 	GoogleMapsAPIKey  string
 
@@ -61,6 +63,8 @@ func LoadConfig() *AppConfig {
 		MongoURI:          mongoURI,
 		JWTSecret:         os.Getenv("JWT_SECRET"),
 		JWTAlgorithm:      os.Getenv("JWT_ALGORITHM"),
+		JWTAudience:       os.Getenv("JWT_AUDIENCE"),
+		JWTIssuer:         os.Getenv("JWT_ISSUER"),
 		APIKey:            os.Getenv("API_KEY"),
 		GoogleMapsAPIKey:  os.Getenv("GOOGLE_MAPS_API_KEY"),
 

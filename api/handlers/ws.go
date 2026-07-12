@@ -8,6 +8,7 @@ import (
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/websocket"
+	"github.com/golang-jwt/jwt/v5"
 
 	gorilla "github.com/gorilla/websocket"
 )
@@ -32,15 +33,23 @@ func ServeWS(manager *websocket.Manager, cfg *config.AppConfig, w http.ResponseW
 		return
 	}
 
-	// 1. Extract Token from Query Parameter (e.g. ws://domain/ws?token=XYZ)
+	// V9: Extract Token from Query Parameter (e.g. ws://domain/ws?token=XYZ)
+	// Known issue: tokens in query params can leak via proxy logs. Future: migrate to first-message auth.
 	tokenStr := r.URL.Query().Get("token")
 	if tokenStr == "" {
 		response.Error(w, "Unauthorized: missing token", http.StatusUnauthorized)
 		return
 	}
 
-	// 2. Validate JWT Token
-	claims, err := auth.ValidateToken(tokenStr, cfg.JWTSecret)
+	// 2. Validate JWT Token with optional audience/issuer
+	var jwtOpts []jwt.ParserOption
+	if cfg.JWTAudience != "" {
+		jwtOpts = append(jwtOpts, jwt.WithAudience(cfg.JWTAudience))
+	}
+	if cfg.JWTIssuer != "" {
+		jwtOpts = append(jwtOpts, jwt.WithIssuer(cfg.JWTIssuer))
+	}
+	claims, err := auth.ValidateToken(tokenStr, cfg.JWTSecret, jwtOpts...)
 	if err != nil {
 		log.Error().Err(err).Msg("WebSocket auth failed")
 		response.Error(w, "Unauthorized: invalid token", http.StatusUnauthorized)

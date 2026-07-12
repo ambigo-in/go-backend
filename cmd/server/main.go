@@ -27,6 +27,7 @@ import (
 	"ambigo-backend/internal/translation"
 	"ambigo-backend/internal/websocket"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
@@ -128,20 +129,42 @@ func main() {
 	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackStore)
 
+	// V16: Audit persistence
+	auditStore := admin.NewAuditStore(recordsDB)
+
 	// Subscribe EventBus Subscribers
 	websocket.NewWSNotifier(wsManager).SubscribeTo(eventBus)
 	eventbus.NewFCMNotifier(fcmClient, authStore).SubscribeTo(eventBus)
 	eventbus.NewMetricsCollector().SubscribeTo(eventBus)
 	eventbus.NewCacheInvalidator(counterStore).SubscribeTo(eventBus)
-	eventbus.NewAuditLogger().SubscribeTo(eventBus)
+	eventbus.NewAuditLogger(auditStore).SubscribeTo(eventBus)
 	eventbus.NewAnalyticsTracker().SubscribeTo(eventBus)
 
 	// Middlewares
-	jwtAuth := middleware.JWTAuth(appConfig.JWTSecret)
+	var jwtOpts []jwt.ParserOption
+	if appConfig.JWTAudience != "" {
+		jwtOpts = append(jwtOpts, jwt.WithAudience(appConfig.JWTAudience))
+	}
+	if appConfig.JWTIssuer != "" {
+		jwtOpts = append(jwtOpts, jwt.WithIssuer(appConfig.JWTIssuer))
+	}
+	jwtAuth := middleware.JWTAuth(appConfig.JWTSecret, jwtOpts...)
 	requireUser := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("user", next)) }
 	requireDriver := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("driver", next)) }
 	requireUnvrfDriver := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("unvrf_driver", next)) }
+	requireDriverOrUnvrf := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireAnyRole([]string{"driver", "unvrf_driver"}, next)) }
 	requireAdmin := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("admin", next)) }
+	// A6: Admin sub-role enforcement (backward compat — empty role = full access)
+	adminAllowedRoles := []string{"super_admin", "admin", ""}
+	requireAdminRole := func(allowedRoles []string, next http.HandlerFunc) http.Handler {
+		return jwtAuth(middleware.RequireRole("admin", middleware.RequireAdminPermission(allowedRoles, next)))
+	}
+
+	// Rate limiters
+	otpIPLimiter := middleware.NewIPLimiter(3, 5)                     // V1: IP-based for OTP request
+	verifyMobileLimiter := middleware.NewMobileRateLimiter(3, 5)      // V1: mobile-based for OTP verify
+	adminLoginLimiter := middleware.NewIPLimiter(5, 10)               // V7: IP-based for admin login
+	globalRateLimiter := middleware.NewIPLimiter(100, 200)            // A5: Global per-IP limit for all authenticated routes
 
 	mux := http.NewServeMux()
 	
@@ -222,31 +245,41 @@ func main() {
 	mux.Handle("POST /api/v2/rides/current", jwtAuth(http.HandlerFunc(rideHandler.HandleGetCurrentRide)))
 	mux.Handle("POST /api/v2/rides/driver/details", jwtAuth(http.HandlerFunc(rideHandler.HandleGetDriverDetails)))
 	mux.Handle("POST /api/v2/rides/user/details", jwtAuth(http.HandlerFunc(rideHandler.HandleGetUserDetails)))
+	mux.Handle("POST /api/v2/rides/feedback/list", requireDriver(http.HandlerFunc(feedbackHandler.HandleListFeedback)))
 	mux.Handle("POST /api/v2/route", jwtAuth(http.HandlerFunc(rideHandler.HandleRoutePreview)))
 	mux.Handle("POST /api/v2/fare/estimate", jwtAuth(http.HandlerFunc(rideHandler.HandleFareEstimate)))
 
-	// Auth Endpoints (Public) — OTP request has rate limiting
-	otpLimiter := middleware.NewIPLimiter(3, 5)
-	mux.HandleFunc("POST /api/v2/auth/user/request-otp", middleware.RateLimit(authHandler.HandleUserRequestOTP, otpLimiter))
-	mux.HandleFunc("POST /api/v2/auth/user/verify-otp", authHandler.HandleUserVerifyOTP)
-	mux.HandleFunc("POST /api/v2/auth/driver/request-otp", middleware.RateLimit(authHandler.HandleDriverRequestOTP, otpLimiter))
-	mux.HandleFunc("POST /api/v2/auth/driver/verify-otp", authHandler.HandleDriverVerifyOTP)
+	// Auth Endpoints (Public) — V1: OTP request rate limited by IP, OTP verify rate limited by mobile
+	mux.HandleFunc("POST /api/v2/auth/user/request-otp", middleware.RateLimit(authHandler.HandleUserRequestOTP, otpIPLimiter))
+	mux.HandleFunc("POST /api/v2/auth/user/verify-otp", middleware.RateLimitMobile(authHandler.HandleUserVerifyOTP, verifyMobileLimiter))
+	mux.HandleFunc("POST /api/v2/auth/driver/request-otp", middleware.RateLimit(authHandler.HandleDriverRequestOTP, otpIPLimiter))
+	mux.HandleFunc("POST /api/v2/auth/driver/verify-otp", middleware.RateLimitMobile(authHandler.HandleDriverVerifyOTP, verifyMobileLimiter))
+	// V8: Token refresh, V4: Logout, V18: Sessions
+	mux.HandleFunc("POST /api/v2/auth/refresh", authHandler.HandleRefreshToken)
+	mux.Handle("POST /api/v2/auth/logout", jwtAuth(http.HandlerFunc(authHandler.HandleLogout)))
+	mux.Handle("POST /api/v2/auth/sessions", jwtAuth(http.HandlerFunc(authHandler.HandleListSessions)))
+	mux.Handle("POST /api/v2/auth/sessions/revoke", jwtAuth(http.HandlerFunc(authHandler.HandleRevokeSession)))
 
 	// Profile Endpoints (Protected)
 	mux.Handle("POST /api/v2/user/profile", requireUser(profileHandler.HandleGetUserProfile))
 	mux.Handle("POST /api/v2/user/fcm", requireUser(profileHandler.HandleUpdateUserFCM))
 	
-	mux.Handle("POST /api/v2/driver/profile", jwtAuth(http.HandlerFunc(profileHandler.HandleGetDriverProfile)))
-	mux.Handle("POST /api/v2/driver/fcm", jwtAuth(http.HandlerFunc(profileHandler.HandleUpdateDriverFCM)))
+	// V10: driver/profile and driver/fcm allow both driver and unvrf_driver roles
+	mux.Handle("POST /api/v2/driver/profile", requireDriverOrUnvrf(profileHandler.HandleGetDriverProfile))
+	mux.Handle("POST /api/v2/driver/fcm", requireDriverOrUnvrf(profileHandler.HandleUpdateDriverFCM))
 
 	// Verification Endpoints (Protected)
 	mux.Handle("POST /api/v2/driver/verification/check", jwtAuth(http.HandlerFunc(verificationHandler.HandleCheckVerification)))
 	mux.Handle("POST /api/v2/driver/verification/update", requireUnvrfDriver(verificationHandler.HandleUpdateVerification))
 
 	// Admin Endpoints (Protected)
-	mux.HandleFunc("POST /api/v2/admin/login", adminHandler.HandleAdminLogin)
-	mux.HandleFunc("POST /api/v2/admin/login/mobile", adminHandler.HandleAdminMobileRequestOTP)
-	mux.HandleFunc("POST /api/v2/admin/login/mobile/verify", adminHandler.HandleAdminMobileVerifyOTP)
+	// V7: Rate limit admin login (username/password — IP-based)
+	mux.HandleFunc("POST /api/v2/admin/login", middleware.RateLimit(adminHandler.HandleAdminLogin, adminLoginLimiter))
+	// Admin OTP login: request IP-limited, verify mobile-limited
+	mux.HandleFunc("POST /api/v2/admin/login/mobile", middleware.RateLimit(adminHandler.HandleAdminMobileRequestOTP, otpIPLimiter))
+	mux.HandleFunc("POST /api/v2/admin/login/mobile/verify", middleware.RateLimitMobile(adminHandler.HandleAdminMobileVerifyOTP, verifyMobileLimiter))
+	// V19: Admin password change
+	mux.Handle("POST /api/v2/admin/password", requireAdmin(http.HandlerFunc(adminHandler.HandleAdminPasswordChange)))
 	mux.Handle("POST /api/v2/admin/ambulance_types", requireAdmin(http.HandlerFunc(adminHandler.HandleCreateAmbulanceType)))
 	mux.Handle("GET /api/v2/admin/ambulance_types", requireAdmin(http.HandlerFunc(adminHandler.HandleListAmbulanceTypes)))
 	mux.Handle("DELETE /api/v2/admin/ambulance_types/{id}", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteAmbulanceType)))
@@ -260,8 +293,8 @@ func main() {
 	mux.Handle("POST /api/v2/admin/drivers/unverified/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListUnverifiedDrivers)))
 	mux.Handle("POST /api/v2/admin/drivers/unverified/list/all", requireAdmin(http.HandlerFunc(adminHandler.HandleListAllUnverifiedDrivers)))
 	mux.Handle("POST /api/v2/admin/drivers/unverified/fetch", requireAdmin(http.HandlerFunc(adminHandler.HandleFetchUnverifiedDriver)))
-	mux.Handle("POST /api/v2/admin/drivers/unverified/accept", requireAdmin(http.HandlerFunc(adminHandler.HandleAcceptDriver)))
-	mux.Handle("POST /api/v2/admin/drivers/unverified/reject", requireAdmin(http.HandlerFunc(adminHandler.HandleRejectDriver)))
+	mux.Handle("POST /api/v2/admin/drivers/unverified/accept", requireAdminRole(adminAllowedRoles, adminHandler.HandleAcceptDriver))
+	mux.Handle("POST /api/v2/admin/drivers/unverified/reject", requireAdminRole(adminAllowedRoles, adminHandler.HandleRejectDriver))
 	mux.Handle("POST /api/v2/admin/drivers/unverified/counter", requireAdmin(http.HandlerFunc(adminHandler.HandleUnverifiedDriverCounter)))
 	// Admin: Driver Ride History
 	mux.Handle("POST /api/v2/admin/drivers/rides/list", requireAdmin(http.HandlerFunc(adminHandler.HandleDriverRideList)))
@@ -284,14 +317,14 @@ func main() {
 	mux.Handle("GET /api/v2/admin/offers", requireAdmin(http.HandlerFunc(offerHandler.HandleList)))
 	mux.Handle("DELETE /api/v2/admin/offers/{id}", requireAdmin(http.HandlerFunc(offerHandler.HandleDelete)))
 
-	// Apply API key auth to all routes except /metrics, /health, and /ws (WebSocket validates api_key via query param)
+	// Apply API key auth + global rate limiter to all routes except /metrics, /health, and /ws
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
 		if path == "/metrics" || path == "/api/v1/health" || path == "/ws" {
 			mux.ServeHTTP(w, r)
 			return
 		}
-		apiKeyAuth(mux).ServeHTTP(w, r)
+		middleware.RateLimitMiddleware(globalRateLimiter, apiKeyAuth(mux)).ServeHTTP(w, r)
 	})
 	server := &http.Server{
 		Addr:              ":" + appConfig.Port,

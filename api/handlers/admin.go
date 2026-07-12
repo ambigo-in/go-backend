@@ -75,18 +75,16 @@ func (h *AdminHandler) HandleAdminLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	token, err := auth.GenerateJWT(adminUser.ID.Hex(), "admin", h.JWTSecret)
+	token, err := auth.GenerateJWT(adminUser.ID.Hex(), "admin", adminUser.Role, h.JWTSecret)
 	if err != nil {
 		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	json.NewEncoder(w).Encode(map[string]string{
 		"detail": "Admin Login Successful",
 		"token":  token,
-		"name":   adminUser.Name,
-		"role":   adminUser.Role,
 	})
 }
 
@@ -124,12 +122,12 @@ func (h *AdminHandler) HandleAdminMobileRequestOTP(w http.ResponseWriter, r *htt
 
 	if err := auth.SendSMS(h.SMSCfg, req.Mobile, otp, ""); err != nil {
 		logger.Log.Error().Err(err).Str("mobile", req.Mobile).Msg("Admin OTP SMS send failed")
-		response.Error(w, "Failed to send SMS: "+err.Error(), http.StatusInternalServerError)
+		response.Error(w, "Failed to send SMS", http.StatusInternalServerError)
 		return
 	}
 
 	logger.Log.Info().Str("mobile", req.Mobile).Msg("Admin OTP sent via SMS")
-	json.NewEncoder(w).Encode(map[string]string{"detail": "OTP sent"})
+	json.NewEncoder(w).Encode(map[string]string{"detail": "OTP sent", "name": adminUser.Name})
 }
 
 func (h *AdminHandler) HandleAdminMobileVerifyOTP(w http.ResponseWriter, r *http.Request) {
@@ -169,19 +167,72 @@ func (h *AdminHandler) HandleAdminMobileVerifyOTP(w http.ResponseWriter, r *http
 		return
 	}
 
-	token, err := auth.GenerateJWT(adminUser.ID.Hex(), "admin", h.JWTSecret)
+	token, err := auth.GenerateJWT(adminUser.ID.Hex(), "admin", adminUser.Role, h.JWTSecret)
 	if err != nil {
 		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
-		"detail": "Admin Login Successful",
-		"token":  token,
-		"name":   adminUser.Name,
-		"role":   adminUser.Role,
+	refreshToken, _, err := h.AuthStore.CreateRefreshToken(r.Context(), adminUser.ID.Hex(), "admin", "", "")
+	if err != nil {
+		logger.Log.Error().Err(err).Msg("Admin refresh token creation failed")
+	}
+
+	response.Success(w, http.StatusOK, map[string]string{
+		"access_token":  token,
+		"refresh_token": refreshToken,
 	})
+}
+
+// V19: Admin password change
+func (h *AdminHandler) HandleAdminPasswordChange(w http.ResponseWriter, r *http.Request) {
+	adminIDStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		CurrentPassword string `json:"current_password" validate:"required"`
+		NewPassword     string `json:"new_password" validate:"required,min=8"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(adminIDStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	adminUser, err := h.Store.FindAdminByID(r.Context(), objID)
+	if err != nil || adminUser == nil {
+		response.Error(w, "Admin not found", http.StatusNotFound)
+		return
+	}
+
+	if err := bcrypt.CompareHashAndPassword([]byte(adminUser.HashedPassword), []byte(req.CurrentPassword)); err != nil {
+		response.Error(w, "Current password is incorrect", http.StatusUnauthorized)
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	if err := h.Store.UpdateAdminPassword(r.Context(), objID, string(hashed)); err != nil {
+		response.Error(w, "Failed to update password", http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Password updated successfully"})
 }
 
 func (h *AdminHandler) HandleCreateAmbulanceType(w http.ResponseWriter, r *http.Request) {
@@ -458,6 +509,8 @@ func (h *AdminHandler) HandleAcceptDriver(w http.ResponseWriter, r *http.Request
 
 // HandleRejectDriver sets the error message on an unverified driver
 func (h *AdminHandler) HandleRejectDriver(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
 	var req struct {
 		DriverID     string `json:"driver_id" validate:"required"`
 		ErrorMessage string `json:"error_message"`
@@ -478,7 +531,10 @@ func (h *AdminHandler) HandleRejectDriver(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	h.CounterStore.IncrementCounter(r.Context(), "unverified_drivers")
+	h.EventBus.PublishEvent(eventbus.ChannelAdminDriverRejected, eventbus.AdminDriverRejectedPayload{
+		DriverID: req.DriverID, RequestID: reqID,
+	})
+
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver Rejected"})
 }
 
@@ -818,4 +874,3 @@ func (h *AdminHandler) HandleDeleteHospital(w http.ResponseWriter, r *http.Reque
 	})
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Hospital deleted successfully"})
 }
-

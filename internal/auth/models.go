@@ -5,13 +5,11 @@ import (
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
 
-// GeoJSONPoint represents a MongoDB geospatial point
 type GeoJSONPoint struct {
 	Type        string    `bson:"type" json:"type"`
-	Coordinates []float64 `bson:"coordinates" json:"coordinates"` // [longitude, latitude]
+	Coordinates []float64 `bson:"coordinates" json:"coordinates"`
 }
 
-// User represents a rider profile
 type User struct {
 	ID           primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
 	Name         string             `bson:"name" json:"name"`
@@ -22,7 +20,6 @@ type User struct {
 	JWTToken     *string            `bson:"jwt_token,omitempty" json:"jwt_token,omitempty"`
 }
 
-// DriverDetails contains the document URLs for verification
 type DriverDetails struct {
 	POIImage  string `bson:"poi_image" json:"poi_image"`
 	RCNumber  string `bson:"rc_number" json:"rc_number"`
@@ -33,7 +30,6 @@ type DriverDetails struct {
 	AmbInside string `bson:"amb_inside,omitempty" json:"amb_inside,omitempty"`
 }
 
-// WalletDetails tracks a driver's Zwitch banking configuration
 type WalletDetails struct {
 	AccountNo string `bson:"account_no" json:"account_no" validate:"required"`
 	BenfName  string `bson:"benf_name" json:"benf_name" validate:"required"`
@@ -41,7 +37,6 @@ type WalletDetails struct {
 	BenfID    string `bson:"benf_id" json:"benf_id"`
 }
 
-// Driver represents a fully verified active driver profile
 type Driver struct {
 	ID                 primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
 	Name               string             `bson:"name" json:"name" validate:"required"`
@@ -59,7 +54,6 @@ type Driver struct {
 	Details            *DriverDetails     `bson:"details,omitempty" json:"details,omitempty"`
 }
 
-// UnverifiedDriver represents a driver in the onboarding pipeline
 type UnverifiedDriver struct {
 	ID                 primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
 	Name               string             `bson:"name" json:"name" validate:"required"`
@@ -78,7 +72,6 @@ type UnverifiedDriver struct {
 	Location           *GeoJSONPoint      `bson:"location,omitempty" json:"location,omitempty"`
 }
 
-// VerificationUpdateRequest contains only document image fields sent by the driver app
 type VerificationUpdateRequest struct {
 	PortraitImage string `json:"portrait_image"`
 	POIImage      string `json:"poi_image"`
@@ -88,7 +81,6 @@ type VerificationUpdateRequest struct {
 	AmbInside     string `json:"amb_inside"`
 }
 
-// AuthOTP represents a temporary OTP request
 type AuthOTP struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
 	Number    string             `bson:"number" json:"number"`
@@ -96,14 +88,33 @@ type AuthOTP struct {
 	CreatedAt time.Time          `bson:"created_at" json:"created_at"`
 }
 
-// Referral represents a referral reward transaction
 type Referral struct {
-	ID              primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
-	UserType        string             `bson:"user_type" json:"user_type"` // "user" or "driver"
-	RefFrom         string             `bson:"ref_from" json:"ref_from"`
-	RefTo           string             `bson:"ref_to" json:"ref_to"`
-	Value           string             `bson:"value" json:"value"`
-	RidesDone       int                `bson:"rides_done" json:"rides_done"`
-	AmountReceived  bool               `bson:"amount_recievied" json:"amount_received"`
-	CreatedAt       time.Time          `bson:"created_at" json:"created_at"`
+	ID             primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
+	UserType       string             `bson:"user_type" json:"user_type"`
+	RefFrom        string             `bson:"ref_from" json:"ref_from"`
+	RefTo          string             `bson:"ref_to" json:"ref_to"`
+	Value          string             `bson:"value" json:"value"`
+	RidesDone      int                `bson:"rides_done" json:"rides_done"`
+	AmountReceived bool               `bson:"amount_recievied" json:"amount_received"`
+	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
+}
+
+type RefreshToken struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
+	UserID     string             `bson:"user_id" json:"user_id"`
+	Role       string             `bson:"role" json:"role"`
+	TokenHash  string             `bson:"token_hash" json:"-"`
+	DeviceID   string             `bson:"device_id,omitempty" json:"device_id,omitempty"`
+	DeviceName string             `bson:"device_name,omitempty" json:"device_name,omitempty"`
+	CreatedAt  time.Time          `bson:"created_at" json:"created_at"`
+	ExpiresAt  time.Time          `bson:"expires_at" json:"expires_at"`
+	Revoked    bool               `bson:"revoked" json:"revoked"`
+}
+
+type OTPAttempt struct {
+	ID         primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
+	Mobile     string             `bson:"mobile" json:"mobile"`
+	Attempts   int                `bson:"attempts" json:"attempts"`
+	LockedUntil *time.Time         `bson:"locked_until,omitempty" json:"locked_until,omitempty"`
+	UpdatedAt  time.Time          `bson:"updated_at" json:"updated_at"`
 }

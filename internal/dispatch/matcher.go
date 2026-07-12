@@ -41,10 +41,10 @@ type expansionStep struct {
 // expansionPlan defines the progressive search radii for ambulance dispatch.
 // Each step searches a wider area until drivers are found.
 var expansionPlan = []expansionStep{
-	{9, 1}, // Res 9 ring 1  ~0.5 km
-	{7, 1}, // Res 7 ring 1  ~3   km
-	{6, 2}, // Res 6 ring 2  ~15  km
-	{5, 2}, // Res 5 ring 2  ~40  km
+	{9, 1},  // ~0.5 km
+	{9, 10}, // ~3   km
+	{9, 32}, // ~10  km
+	{9, 48}, // ~15  km
 }
 
 // FindAvailableOtherTypes searches for available drivers of OTHER ambulance types
