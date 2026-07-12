@@ -206,9 +206,18 @@ func (h *PaymentHandler) HandleGetByRide(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	callerID, _ := r.Context().Value(middleware.UserIDKey).(string)
+	callerRole, _ := r.Context().Value(middleware.UserRoleKey).(string)
+
 	pmt, err := h.Store.FindPaymentByRideID(r.Context(), req.RideID)
 	if err != nil || pmt == nil {
 		response.Error(w, "Payment not found", http.StatusNotFound)
+		return
+	}
+
+	// A1: Ownership check — only the ride's user, driver, or admin can view payment
+	if callerRole != "admin" && callerID != pmt.UserID && callerID != pmt.PartnerID {
+		response.Error(w, "Forbidden: you do not own this payment", http.StatusForbidden)
 		return
 	}
 

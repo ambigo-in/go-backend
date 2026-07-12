@@ -8,45 +8,59 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
+const accessTokenExpiry = 15 * time.Minute
+
 type Claims struct {
-	ID   string `json:"_id"`
-	Role string `json:"role"` // "driver" or "user"
+	ID        string `json:"_id"`
+	Role      string `json:"role"`
+	AdminRole string `json:"admin_role,omitempty"`
 	jwt.RegisteredClaims
 }
 
-// ValidateToken parses and validates a JWT token string, returning the claims
-func ValidateToken(tokenString string, secret string) (*Claims, error) {
+func ValidateToken(tokenString string, secret string, opts ...jwt.ParserOption) (*Claims, error) {
+	allOpts := append([]jwt.ParserOption{
+		jwt.WithValidMethods([]string{"HS256"}),
+	}, opts...)
+
 	token, err := jwt.ParseWithClaims(tokenString, &Claims{}, func(token *jwt.Token) (interface{}, error) {
-		// Ensure the signing method is HMAC
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 		}
 		return []byte(secret), nil
-	})
-
+	}, allOpts...)
 	if err != nil {
 		return nil, err
 	}
-
 	if claims, ok := token.Claims.(*Claims); ok && token.Valid {
 		return claims, nil
 	}
-
 	return nil, errors.New("invalid token")
 }
 
-// GenerateJWT creates a new JWT token for a user or driver
-func GenerateJWT(id string, role string, secret string) (string, error) {
-	// Let's set it to expire in 30 days
+func GenerateAccessToken(id string, role string, secret string) (string, error) {
 	claims := Claims{
 		ID:   id,
 		Role: role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().AddDate(0, 1, 0)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(accessTokenExpiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	return token.SignedString([]byte(secret))
+}
 
+// GenerateJWT generates admin tokens with 24-hour expiry and embeds the admin's stored role
+func GenerateJWT(id string, role string, adminRole string, secret string) (string, error) {
+	claims := Claims{
+		ID:        id,
+		Role:      role,
+		AdminRole: adminRole,
+		RegisteredClaims: jwt.RegisteredClaims{
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			IssuedAt:  jwt.NewNumericDate(time.Now()),
+		},
+	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
 }

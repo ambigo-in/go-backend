@@ -30,7 +30,11 @@ func (h *VerificationHandler) HandleCheckVerification(w http.ResponseWriter, r *
 		return
 	}
 
-	objID, _ := primitive.ObjectIDFromHex(uidStr)
+	objID, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
 
 	// First, check the active drivers collection
 	driver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
@@ -58,13 +62,23 @@ func (h *VerificationHandler) HandleCheckVerification(w http.ResponseWriter, r *
 		return
 	}
 
-	response.Error(w, "User not found", http.StatusNotFound)
+	// V15: Don't leak user existence — return same 404 regardless
+	response.Error(w, "Not found", http.StatusNotFound)
 }
 
 // HandleUpdateVerification handles the document upload pipeline for drivers
 func (h *VerificationHandler) HandleUpdateVerification(w http.ResponseWriter, r *http.Request) {
-	uidStr, _ := r.Context().Value(middleware.UserIDKey).(string)
-	objID, _ := primitive.ObjectIDFromHex(uidStr)
+	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
 
 	var req auth.VerificationUpdateRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

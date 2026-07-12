@@ -25,6 +25,7 @@ const (
 	ChannelAdminHospitalDeleted = "admin:hospital_deleted"
 	ChannelAdminOfferCreated    = "admin:offer_created"
 	ChannelAdminOfferDeleted    = "admin:offer_deleted"
+	ChannelAdminDriverRejected = "admin:driver_rejected"
 )
 
 // RideRequestedPayload is published when a user requests a ride
@@ -201,4 +202,10 @@ type AdminOfferPayload struct {
 	OfferID     string `json:"offer_id"`
 	Description string `json:"description,omitempty"`
 	RequestID   string `json:"request_id,omitempty"`
+}
+
+// AdminDriverRejectedPayload is published when an admin rejects a driver
+type AdminDriverRejectedPayload struct {
+	DriverID  string `json:"driver_id"`
+	RequestID string `json:"request_id,omitempty"`
 }

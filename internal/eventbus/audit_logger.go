@@ -1,16 +1,21 @@
 package eventbus
 
 import (
+	"context"
 	"encoding/json"
 
+	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/logger"
 )
 
-// AuditLogger listens to all events and writes them to the audit log.
-type AuditLogger struct{}
+type AuditLogger struct {
+	auditStore *admin.AuditStore
+}
 
-func NewAuditLogger() *AuditLogger {
-	return &AuditLogger{}
+func NewAuditLogger(auditStore *admin.AuditStore) *AuditLogger {
+	return &AuditLogger{
+		auditStore: auditStore,
+	}
 }
 
 func (l *AuditLogger) SubscribeTo(bus *InMemoryBus) {
@@ -25,6 +30,7 @@ func (l *AuditLogger) SubscribeTo(bus *InMemoryBus) {
 		ChannelAdminAmbTypeCreated, ChannelAdminAmbTypeDeleted,
 		ChannelAdminHospitalAdded, ChannelAdminHospitalUpdated, ChannelAdminHospitalDeleted,
 		ChannelAdminOfferCreated, ChannelAdminOfferDeleted,
+		ChannelAdminDriverRejected,
 	}
 	for _, ch := range channels {
 		bus.Subscribe(ch, l.handleEvent)
@@ -32,12 +38,38 @@ func (l *AuditLogger) SubscribeTo(bus *InMemoryBus) {
 }
 
 func (l *AuditLogger) handleEvent(payload []byte) {
-	evt := logger.Log.Info().Str("channel", "audit").Str("payload", string(payload))
 	var raw map[string]interface{}
-	if json.Unmarshal(payload, &raw) == nil {
-		if reqID, ok := raw["request_id"].(string); ok && reqID != "" {
-			evt = evt.Str("request_id", reqID)
+	_ = json.Unmarshal(payload, &raw)
+
+	channel := ""
+	if ch, ok := raw["_channel"].(string); ok {
+		channel = ch
+	}
+
+	requestID := ""
+	if rid, ok := raw["request_id"].(string); ok {
+		requestID = rid
+	}
+
+	evt := logger.Log.Info().Str("channel", "audit")
+	if channel != "" {
+		evt = evt.Str("event_channel", channel)
+	}
+	if requestID != "" {
+		evt = evt.Str("request_id", requestID)
+	}
+	evt.RawJSON("payload", payload).Msg("audit event")
+
+	// V16: Persist to MongoDB
+	if l.auditStore != nil {
+		auditEvent := &admin.AuditEvent{
+			EventType: channel,
+			Channel:   channel,
+			Payload:   string(payload),
+			RequestID: requestID,
+		}
+		if err := l.auditStore.InsertEvent(context.Background(), auditEvent); err != nil {
+			logger.Log.Error().Err(err).Msg("Failed to persist audit event")
 		}
 	}
-	evt.Msg("audit event")
 }

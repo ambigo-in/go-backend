@@ -115,3 +115,8 @@ func (s *Store) UpdateAdminLocation(ctx context.Context, id primitive.ObjectID, 
 	_, err := s.admins.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"location": location}})
 	return err
 }
+
+func (s *Store) UpdateAdminPassword(ctx context.Context, id primitive.ObjectID, hashedPassword string) error {
+	_, err := s.admins.UpdateOne(ctx, bson.M{"_id": id}, bson.M{"$set": bson.M{"hashed_password": hashedPassword}})
+	return err
+}

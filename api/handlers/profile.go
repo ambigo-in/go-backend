@@ -55,8 +55,16 @@ func (h *ProfileHandler) HandleGetUserProfile(w http.ResponseWriter, r *http.Req
 
 // HandleUpdateUserFCM updates the user's FCM token
 func (h *ProfileHandler) HandleUpdateUserFCM(w http.ResponseWriter, r *http.Request) {
-	uidStr, _ := r.Context().Value(middleware.UserIDKey).(string)
-	objID, _ := primitive.ObjectIDFromHex(uidStr)
+	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	objID, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
 
 	var payload struct {
 		FCMToken string `json:"fcm_token"`
@@ -66,7 +74,7 @@ func (h *ProfileHandler) HandleUpdateUserFCM(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	err := h.AuthStore.UpdateUserFCM(r.Context(), objID, payload.FCMToken)
+	err = h.AuthStore.UpdateUserFCM(r.Context(), objID, payload.FCMToken)
 	if err != nil {
 		response.Error(w, "Failed to update FCM token", http.StatusInternalServerError)
 		return
@@ -82,9 +90,22 @@ func (h *ProfileHandler) HandleUpdateUserFCM(w http.ResponseWriter, r *http.Requ
 
 // HandleGetDriverProfile returns the verified driver's details
 func (h *ProfileHandler) HandleGetDriverProfile(w http.ResponseWriter, r *http.Request) {
-	uidStr, _ := r.Context().Value(middleware.UserIDKey).(string)
-	role, _ := r.Context().Value(middleware.UserRoleKey).(string)
-	objID, _ := primitive.ObjectIDFromHex(uidStr)
+	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role, ok := r.Context().Value(middleware.UserRoleKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
 
 	if role == "unvrf_driver" {
 		driver, err := h.AuthStore.FindUnverifiedDriverByID(r.Context(), objID)
@@ -118,9 +139,22 @@ func (h *ProfileHandler) HandleGetDriverProfile(w http.ResponseWriter, r *http.R
 
 // HandleUpdateDriverFCM updates the driver's FCM token
 func (h *ProfileHandler) HandleUpdateDriverFCM(w http.ResponseWriter, r *http.Request) {
-	uidStr, _ := r.Context().Value(middleware.UserIDKey).(string)
-	role, _ := r.Context().Value(middleware.UserRoleKey).(string)
-	objID, _ := primitive.ObjectIDFromHex(uidStr)
+	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role, ok := r.Context().Value(middleware.UserRoleKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(uidStr)
+	if err != nil {
+		response.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
 
 	var payload struct {
 		FCMToken string `json:"fcm_token"`
@@ -130,7 +164,6 @@ func (h *ProfileHandler) HandleUpdateDriverFCM(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var err error
 	if role == "unvrf_driver" {
 		err = h.AuthStore.UpdateUnverifiedDriverFCM(r.Context(), objID, payload.FCMToken)
 	} else {

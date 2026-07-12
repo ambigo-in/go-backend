@@ -74,6 +74,15 @@ func EnsureIndexes(client *mongo.Client) error {
 		return err
 	}
 
+	// Refresh tokens — index on token_hash for fast lookup, user_id for listing sessions
+	recordsDB := client.Database("Records")
+	if _, err := recordsDB.Collection("refresh_tokens").Indexes().CreateMany(ctx, []mongo.IndexModel{
+		{Keys: bson.D{{"token_hash", 1}}},
+		{Keys: bson.D{{"user_id", 1}}},
+	}); err != nil {
+		return err
+	}
+
 	// Auth OTP — index on number for OTP lookup, plus TTL on created_at
 	authOTP := users.Collection("auth_otp")
 	if _, err := authOTP.Indexes().CreateMany(ctx, []mongo.IndexModel{
