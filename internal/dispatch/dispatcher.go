@@ -186,12 +186,12 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 	if err != nil || len(candidates) == 0 {
 		availableTypes := d.Matcher.FindAvailableOtherTypes(pickupLat, pickupLng, ambTypeID)
 		logger.Log.Warn().Str("ride_id", rideIDStr).Str("request_id", reqID).Msg("No drivers found. Cancelling.")
-		d.RideStore.CancelRide(context.Background(), rideIDStr, ride.StatusSearching, "no_drivers")
+		d.RideStore.CancelRide(context.Background(), rideIDStr, ride.StatusSearching, "no_drivers", availableTypes)
 		d.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
-			RideID:        rideIDStr,
-			Reason:        "no_drivers",
-			UserID:        r.UserID,
-			RequestID:     reqID,
+			RideID:         rideIDStr,
+			Reason:         "no_drivers",
+			UserID:         r.UserID,
+			RequestID:      reqID,
 			AvailableTypes: availableTypes,
 		})
 		return
@@ -302,13 +302,13 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 
 	availableTypes := d.Matcher.FindAvailableOtherTypes(pickupLat, pickupLng, ambTypeID)
 	logger.Log.Warn().Str("ride_id", rideIDStr).Str("request_id", reqID).Msg("All candidates exhausted. Cancelling.")
-	d.RideStore.CancelRide(context.Background(), rideIDStr, ride.StatusSearching, "all_drivers_exhausted")
+	d.RideStore.CancelRide(context.Background(), rideIDStr, ride.StatusSearching, "all_drivers_exhausted", availableTypes)
 
 	d.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
-		RideID:        rideIDStr,
-		Reason:        "all_drivers_exhausted",
-		UserID:        r.UserID,
-		RequestID:     reqID,
+		RideID:         rideIDStr,
+		Reason:         "all_drivers_exhausted",
+		UserID:         r.UserID,
+		RequestID:      reqID,
 		AvailableTypes: availableTypes,
 	})
 }

@@ -117,7 +117,7 @@ func (s *Store) UpdateRideStatus(ctx context.Context, rideID string, currentStat
 }
 
 // CancelRide sets status to CANCELLED, records cancellation time and reason.
-func (s *Store) CancelRide(ctx context.Context, rideID string, currentStatus RideStatus, reason string) error {
+func (s *Store) CancelRide(ctx context.Context, rideID string, currentStatus RideStatus, reason string, availableTypes ...[]string) error {
 	objID, err := primitive.ObjectIDFromHex(rideID)
 	if err != nil {
 		return err
@@ -132,13 +132,15 @@ func (s *Store) CancelRide(ctx context.Context, rideID string, currentStatus Rid
 			"_id":    objID,
 			"status": currentStatus,
 		}
-		update := bson.M{
-			"$set": bson.M{
-				"status":              StatusCancelled,
-				"time.cancelled_at":   time.Now(),
-				"cancellation_reason": reason,
-			},
+		setFields := bson.M{
+			"status":              StatusCancelled,
+			"time.cancelled_at":   time.Now(),
+			"cancellation_reason": reason,
 		}
+		if len(availableTypes) > 0 && len(availableTypes[0]) > 0 {
+			setFields["available_types"] = availableTypes[0]
+		}
+		update := bson.M{"$set": setFields}
 		result, err := s.collection.UpdateOne(ctx, filter, update)
 		if err != nil {
 			return err

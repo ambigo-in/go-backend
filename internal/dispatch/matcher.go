@@ -54,33 +54,63 @@ func (m *Matcher) FindAvailableOtherTypes(pickupLat, pickupLng float64, excludeA
 	lastStep := expansionPlan[len(expansionPlan)-1]
 	originCell := location.GetH3CellAtResolution(pickupLat, pickupLng, lastStep.resolution)
 	if originCell == "" {
+		logger.Log.Warn().Float64("lat", pickupLat).Float64("lng", pickupLng).Msg("FindAvailableOtherTypes: originCell empty")
 		return nil
 	}
 	searchCells, err := location.GetNeighborCellsAtRing(originCell, lastStep.ring)
 	if err != nil {
+		logger.Log.Warn().Err(err).Str("origin", originCell).Int("ring", lastStep.ring).Msg("FindAvailableOtherTypes: GetNeighborCellsAtRing failed")
 		return nil
 	}
+	logger.Log.Debug().Str("origin", originCell).Int("cells", len(searchCells)).Msg("FindAvailableOtherTypes: searching cells")
 	driverIDs, err := m.LocStore.GetDriversInCells(searchCells)
-	if err != nil || len(driverIDs) == 0 {
+	if err != nil {
+		logger.Log.Warn().Err(err).Msg("FindAvailableOtherTypes: GetDriversInCells failed")
 		return nil
 	}
+	if len(driverIDs) == 0 {
+		logger.Log.Debug().Str("origin", originCell).Int("cells", len(searchCells)).Msg("FindAvailableOtherTypes: no drivers found in any cell")
+		return nil
+	}
+	logger.Log.Debug().Str("origin", originCell).Int("drivers_found", len(driverIDs)).Msg("FindAvailableOtherTypes: drivers found in cells")
 
 	seen := make(map[string]bool)
 	var names []string
 	for _, driverID := range driverIDs {
 		status, err := m.LocStore.GetDriverStatus(driverID)
-		if err != nil || status != interfaces.StatusAvailable {
+		if err != nil {
+			logger.Log.Debug().Str("driver_id", driverID).Err(err).Msg("FindAvailableOtherTypes: GetDriverStatus error")
+			continue
+		}
+		if status != interfaces.StatusAvailable {
+			logger.Log.Debug().Str("driver_id", driverID).Str("status", string(status)).Msg("FindAvailableOtherTypes: driver not available")
 			continue
 		}
 		vType, err := m.LocStore.GetDriverVehicleType(driverID)
-		if err != nil || vType == "" || vType == excludeAmbTypeID || seen[vType] {
+		if err != nil {
+			logger.Log.Debug().Str("driver_id", driverID).Err(err).Msg("FindAvailableOtherTypes: GetDriverVehicleType error")
+			continue
+		}
+		if vType == "" {
+			logger.Log.Debug().Str("driver_id", driverID).Msg("FindAvailableOtherTypes: driver has empty vehicle type")
+			continue
+		}
+		if vType == excludeAmbTypeID {
+			logger.Log.Debug().Str("driver_id", driverID).Str("vtype", vType).Msg("FindAvailableOtherTypes: driver has excluded type")
+			continue
+		}
+		if seen[vType] {
 			continue
 		}
 		seen[vType] = true
 		if name, ok := m.AmbTypeNames[vType]; ok {
 			names = append(names, name)
+			logger.Log.Debug().Str("driver_id", driverID).Str("vtype", vType).Str("name", name).Msg("FindAvailableOtherTypes: added available type")
+		} else {
+			logger.Log.Debug().Str("driver_id", driverID).Str("vtype", vType).Msg("FindAvailableOtherTypes: vtype not in AmbTypeNames map")
 		}
 	}
+	logger.Log.Debug().Int("types_found", len(names)).Strs("names", names).Msg("FindAvailableOtherTypes: result")
 	return names
 }
 

@@ -79,4 +79,5 @@ type Ride struct {
 	Time              TimeLog            `bson:"time" json:"time"`
 	DispatchMetadata  DispatchMetadata   `bson:"dispatch_metadata" json:"dispatch_metadata"`
 	CancellationReason string            `bson:"cancellation_reason,omitempty" json:"cancellation_reason,omitempty"`
+	AvailableTypes     []string           `bson:"available_types,omitempty" json:"available_types,omitempty"`
 }
