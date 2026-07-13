@@ -78,4 +78,5 @@ type Ride struct {
 	PaymentID         *string            `bson:"payment_id,omitempty" json:"payment_id,omitempty"`
 	Time              TimeLog            `bson:"time" json:"time"`
 	DispatchMetadata  DispatchMetadata   `bson:"dispatch_metadata" json:"dispatch_metadata"`
+	CancellationReason string            `bson:"cancellation_reason,omitempty" json:"cancellation_reason,omitempty"`
 }

@@ -116,6 +116,40 @@ func (s *Store) UpdateRideStatus(ctx context.Context, rideID string, currentStat
 	})
 }
 
+// CancelRide sets status to CANCELLED, records cancellation time and reason.
+func (s *Store) CancelRide(ctx context.Context, rideID string, currentStatus RideStatus, reason string) error {
+	objID, err := primitive.ObjectIDFromHex(rideID)
+	if err != nil {
+		return err
+	}
+
+	if err := ValidateTransition(currentStatus, StatusCancelled); err != nil {
+		return err
+	}
+
+	return retry.Do(ctx, retry.Default, func(ctx context.Context) error {
+		filter := bson.M{
+			"_id":    objID,
+			"status": currentStatus,
+		}
+		update := bson.M{
+			"$set": bson.M{
+				"status":              StatusCancelled,
+				"time.cancelled_at":   time.Now(),
+				"cancellation_reason": reason,
+			},
+		}
+		result, err := s.collection.UpdateOne(ctx, filter, update)
+		if err != nil {
+			return err
+		}
+		if result.ModifiedCount == 0 {
+			return errors.New("failed to cancel ride, ride might have already changed state")
+		}
+		return nil
+	})
+}
+
 // GetRideByID retrieves a single ride document
 func (s *Store) GetRideByID(ctx context.Context, rideID string) (*Ride, error) {
 	objID, err := primitive.ObjectIDFromHex(rideID)

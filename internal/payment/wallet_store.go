@@ -2,6 +2,7 @@ package payment
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
@@ -68,6 +69,24 @@ func (s *WalletStore) UpdateWalletBalance(ctx context.Context, driverID primitiv
 	update := bson.M{"$inc": bson.M{"wallet_balance": amount}}
 	_, err := s.drivers.UpdateOne(ctx, filter, update)
 	return err
+}
+
+// DeductBalance atomically deducts the amount only if sufficient balance exists.
+// Prevents concurrent withdrawals from driving the balance negative.
+func (s *WalletStore) DeductBalance(ctx context.Context, driverID primitive.ObjectID, amount float64) error {
+	filter := bson.M{
+		"_id":            driverID,
+		"wallet_balance": bson.M{"$gte": amount},
+	}
+	update := bson.M{"$inc": bson.M{"wallet_balance": -amount}}
+	result, err := s.drivers.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return err
+	}
+	if result.ModifiedCount == 0 {
+		return errors.New("insufficient wallet balance")
+	}
+	return nil
 }
 
 // UpdateWalletDetails saves the driver's Zwitch bank details.

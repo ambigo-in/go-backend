@@ -186,7 +186,7 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 	if err != nil || len(candidates) == 0 {
 		availableTypes := d.Matcher.FindAvailableOtherTypes(pickupLat, pickupLng, ambTypeID)
 		logger.Log.Warn().Str("ride_id", rideIDStr).Str("request_id", reqID).Msg("No drivers found. Cancelling.")
-		d.RideStore.UpdateRideStatus(context.Background(), rideIDStr, ride.StatusSearching, ride.StatusCancelled)
+		d.RideStore.CancelRide(context.Background(), rideIDStr, ride.StatusSearching, "no_drivers")
 		d.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
 			RideID:        rideIDStr,
 			Reason:        "no_drivers",
@@ -199,6 +199,11 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 
 	startTime := time.Now()
 	r.DispatchMetadata.CandidatesSearched = len(candidates)
+
+	checkTicker := time.NewTicker(5 * time.Second)
+	defer checkTicker.Stop()
+	candidateTimer := time.NewTimer(30 * time.Second)
+	defer candidateTimer.Stop()
 
 	for i, candidate := range candidates {
 		logger.Log.Info().Str("ride_id", rideIDStr).Str("driver_id", candidate.DriverID).Int("eta", candidate.ETASeconds).Int("candidate", i+1).Int("total", len(candidates)).Str("request_id", reqID).Msg("Offering to driver")
@@ -253,23 +258,42 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 		declineCh := d.declineChannels[rideIDStr]
 		d.mu.RUnlock()
 
-		select {
-		case acceptedDriverID := <-acceptCh:
-			if acceptedDriverID == candidate.DriverID {
-				r.DispatchMetadata.AssignmentLatencyMs = int(time.Since(startTime).Milliseconds())
-				logger.Log.Info().Str("ride_id", rideIDStr).Str("driver_id", candidate.DriverID).Str("request_id", reqID).Msg("Driver accepted the ride")
-				metrics.ObserveDispatchLatency(time.Since(startTime))
-				d.persistDispatchMetadata(rideIDStr, &r.DispatchMetadata)
-				return
+		if !candidateTimer.Stop() {
+			<-candidateTimer.C
+		}
+		candidateTimer.Reset(30 * time.Second)
+
+		candidateHandled := false
+		for !candidateHandled {
+			select {
+			case acceptedDriverID := <-acceptCh:
+				if acceptedDriverID == candidate.DriverID {
+					r.DispatchMetadata.AssignmentLatencyMs = int(time.Since(startTime).Milliseconds())
+					logger.Log.Info().Str("ride_id", rideIDStr).Str("driver_id", candidate.DriverID).Str("request_id", reqID).Msg("Driver accepted the ride")
+					metrics.ObserveDispatchLatency(time.Since(startTime))
+					d.persistDispatchMetadata(rideIDStr, &r.DispatchMetadata)
+					return
+				}
+				candidateHandled = true
+			case declinedDriverID := <-declineCh:
+				if declinedDriverID == candidate.DriverID {
+					r.DispatchMetadata.OffersDeclined++
+					logger.Log.Info().Str("ride_id", rideIDStr).Str("driver_id", candidate.DriverID).Str("request_id", reqID).Msg("Driver declined. Moving to next.")
+				}
+				candidateHandled = true
+			case <-candidateTimer.C:
+				r.DispatchMetadata.OffersTimedOut++
+				logger.Log.Info().Str("ride_id", rideIDStr).Str("driver_id", candidate.DriverID).Str("request_id", reqID).Msg("Driver timed out. Moving to next.")
+				candidateHandled = true
+			case <-checkTicker.C:
+				ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+				currentRide, err := d.RideStore.GetRideByID(ctx, rideIDStr)
+				cancel()
+				if err != nil || currentRide == nil || currentRide.Status != ride.StatusSearching {
+					logger.Log.Warn().Str("ride_id", rideIDStr).Msg("Ride was cancelled externally, stopping matching loop")
+					return
+				}
 			}
-		case declinedDriverID := <-declineCh:
-			if declinedDriverID == candidate.DriverID {
-				r.DispatchMetadata.OffersDeclined++
-				logger.Log.Info().Str("ride_id", rideIDStr).Str("driver_id", candidate.DriverID).Str("request_id", reqID).Msg("Driver declined. Moving to next.")
-			}
-		case <-time.After(30 * time.Second):
-			r.DispatchMetadata.OffersTimedOut++
-			logger.Log.Info().Str("ride_id", rideIDStr).Str("driver_id", candidate.DriverID).Str("request_id", reqID).Msg("Driver timed out. Moving to next.")
 		}
 	}
 
@@ -278,7 +302,7 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 
 	availableTypes := d.Matcher.FindAvailableOtherTypes(pickupLat, pickupLng, ambTypeID)
 	logger.Log.Warn().Str("ride_id", rideIDStr).Str("request_id", reqID).Msg("All candidates exhausted. Cancelling.")
-	d.RideStore.UpdateRideStatus(context.Background(), rideIDStr, ride.StatusSearching, ride.StatusCancelled)
+	d.RideStore.CancelRide(context.Background(), rideIDStr, ride.StatusSearching, "all_drivers_exhausted")
 
 	d.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
 		RideID:        rideIDStr,
