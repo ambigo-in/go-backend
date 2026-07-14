@@ -15,11 +15,18 @@ import (
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
 
+var (
+	ErrTokenAlreadyRevoked = fmt.Errorf("token already revoked")
+	ErrNoLiveToken         = fmt.Errorf("no live token in chain")
+	ErrBrokenChain         = fmt.Errorf("broken token chain")
+	ErrCycleDetected       = fmt.Errorf("cycle detected in token chain")
+)
+
 const (
-	otpExpiry         = 5 * time.Minute
-	maxOTPAttempts    = 5
-	otpLockoutDuration = 1 * time.Hour
-	refreshTokenExpiry = 30 * 24 * time.Hour
+	otpExpiry          = 5 * time.Minute
+	maxOTPAttempts     = 5
+	otpLockoutDuration  = 1 * time.Hour
+	refreshTokenExpiry  = 30 * 24 * time.Hour
 )
 
 type Store struct {
@@ -194,6 +201,98 @@ func (s *Store) ValidateRefreshToken(ctx context.Context, tokenStr string) (*Ref
 		return nil, nil
 	}
 	return &rt, nil
+}
+
+// LookupRefreshTokenByHash finds a refresh token by its hash, returning the document
+// regardless of whether it is revoked or expired. Returns nil if not found.
+func (s *Store) LookupRefreshTokenByHash(ctx context.Context, tokenStr string) (*RefreshToken, error) {
+	raw, err := hex.DecodeString(tokenStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid token format")
+	}
+	hash := sha256.Sum256(raw)
+	tokenHash := hex.EncodeToString(hash[:])
+
+	var rt RefreshToken
+	err = s.refreshTokens.FindOne(ctx, bson.M{"token_hash": tokenHash}).Decode(&rt)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &rt, nil
+}
+
+// RotateById atomically revokes an existing (non-revoked, non-expired) refresh token
+// by its _id and creates a new token linked via superseded_by.
+// Returns the new token and its raw string, or an error if the old token was already revoked.
+func (s *Store) RotateById(ctx context.Context, oldToken *RefreshToken, deviceID, deviceName string) (*RefreshToken, string, error) {
+	if oldToken.Revoked {
+		return nil, "", ErrTokenAlreadyRevoked
+	}
+	if time.Now().After(oldToken.ExpiresAt) {
+		return nil, "", ErrTokenAlreadyRevoked
+	}
+
+	// Create new token first
+	newTokenStr, newToken, err := s.CreateRefreshToken(ctx, oldToken.UserID, oldToken.Role, deviceID, deviceName)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// Atomically revoke old token and link to new one
+	result, err := s.refreshTokens.UpdateOne(
+		ctx,
+		bson.M{"_id": oldToken.ID, "revoked": false},
+		bson.M{"$set": bson.M{"revoked": true, "superseded_by": newToken.ID}},
+	)
+	if err != nil {
+		// Clean up orphaned new token
+		_, _ = s.refreshTokens.DeleteOne(ctx, bson.M{"_id": newToken.ID})
+		return nil, "", err
+	}
+	if result.ModifiedCount == 0 {
+		// Old token was already revoked by a concurrent request
+		_, _ = s.refreshTokens.DeleteOne(ctx, bson.M{"_id": newToken.ID})
+		return nil, "", ErrTokenAlreadyRevoked
+	}
+
+	return newToken, newTokenStr, nil
+}
+
+// FindLiveInChain follows the superseded_by chain starting from a revoked token
+// to find the current live (non-revoked, non-expired) token at the end of the chain.
+func (s *Store) FindLiveInChain(ctx context.Context, startingFrom *RefreshToken) (*RefreshToken, error) {
+	if startingFrom == nil {
+		return nil, fmt.Errorf("FindLiveInChain: startingFrom is nil")
+	}
+	current := startingFrom
+	visited := make(map[primitive.ObjectID]bool)
+
+	for current.SupersededBy != primitive.NilObjectID {
+		if visited[current.SupersededBy] {
+			return nil, ErrCycleDetected
+		}
+		visited[current.SupersededBy] = true
+
+		var next RefreshToken
+		err := s.refreshTokens.FindOne(ctx, bson.M{"_id": current.SupersededBy}).Decode(&next)
+		if err != nil {
+			if err == mongo.ErrNoDocuments {
+				return nil, ErrBrokenChain
+			}
+			return nil, err
+		}
+
+		if !next.Revoked && time.Now().Before(next.ExpiresAt) {
+			return &next, nil
+		}
+
+		current = &next
+	}
+
+	return nil, ErrNoLiveToken
 }
 
 func (s *Store) RevokeRefreshToken(ctx context.Context, tokenStr string) error {

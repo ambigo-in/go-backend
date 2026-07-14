@@ -10,6 +10,7 @@ import (
 	"ambigo-backend/api/response"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/payment"
 	"ambigo-backend/internal/requestid"
 
@@ -133,11 +134,6 @@ func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if driver.WalletBalance < req.Amount {
-		response.Error(w, "Requested amount is greater than wallet balance!!", http.StatusBadRequest)
-		return
-	}
-
 	if driver.WalletDetails.BenfID == "" {
 		response.Error(w, "Driver Account Details not found", http.StatusBadRequest)
 		return
@@ -153,14 +149,22 @@ func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp, err := h.ZwitchService.CreateTransfer(&driver.WalletDetails, amountToTransfer, merchantRefID)
-	if err != nil || resp == nil {
-		response.Error(w, "Withdrawal Initiation failed", http.StatusBadRequest)
+	// Deduct balance atomically before calling Zwitch
+	if err := h.WalletStore.DeductBalance(r.Context(), objID, req.Amount); err != nil {
+		response.Error(w, "Insufficient wallet balance", http.StatusBadRequest)
 		return
 	}
 
-	// Deduct balance
-	h.WalletStore.UpdateWalletBalance(r.Context(), objID, -req.Amount)
+	resp, err := h.ZwitchService.CreateTransfer(&driver.WalletDetails, amountToTransfer, merchantRefID)
+	if err != nil || resp == nil {
+		log := logger.Ctx(r.Context())
+		log.Error().Err(err).Msg("Zwitch transfer failed, refunding wallet")
+		if refundErr := h.WalletStore.UpdateWalletBalance(r.Context(), objID, req.Amount); refundErr != nil {
+			log.Error().Err(refundErr).Msg("Refund also failed — manual intervention required")
+		}
+		response.Error(w, "Withdrawal Initiation failed", http.StatusBadRequest)
+		return
+	}
 
 	// Save transaction log
 	status, _ := resp["status"].(string)

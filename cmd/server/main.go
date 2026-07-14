@@ -54,8 +54,6 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to connect to MongoDB")
 	}
-	defer client.Disconnect(nil)
-
 	if err := config.EnsureIndexes(client); err != nil {
 		log.Fatal().Err(err).Msg("Failed to ensure MongoDB indexes")
 	}
@@ -119,7 +117,7 @@ func main() {
 		SenderID:   appConfig.SMSSenderID,
 		CC:         appConfig.SMSCC,
 	}
-	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg)
+	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg, appConfig.AllowStaleRefreshChain)
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, appConfig.RazorpayWebhookSecret)
@@ -320,7 +318,7 @@ func main() {
 	// Apply API key auth + global rate limiter to all routes except /metrics, /health, and /ws
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path == "/metrics" || path == "/api/v1/health" || path == "/ws" {
+		if path == "/metrics" || path == "/api/v1/health" || path == "/ws" || path == "/api/v2/payment/webhook/razorpay" {
 			mux.ServeHTTP(w, r)
 			return
 		}
