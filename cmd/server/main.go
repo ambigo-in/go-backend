@@ -117,7 +117,7 @@ func main() {
 		SenderID:   appConfig.SMSSenderID,
 		CC:         appConfig.SMSCC,
 	}
-	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg)
+	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg, appConfig.AllowStaleRefreshChain)
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, appConfig.RazorpayWebhookSecret)

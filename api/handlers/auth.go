@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
+	"time"
 
 	"ambigo-backend/api/middleware"
 	"ambigo-backend/api/response"
@@ -17,18 +18,20 @@ import (
 var mobileRegex = regexp.MustCompile(`^[6-9]\d{9}$`)
 
 type AuthHandler struct {
-	AuthStore *auth.Store
-	EventBus  *eventbus.InMemoryBus
-	JWTSecret string
-	SMSCfg    auth.SMSCountryConfig
+	AuthStore              *auth.Store
+	EventBus               *eventbus.InMemoryBus
+	JWTSecret              string
+	SMSCfg                 auth.SMSCountryConfig
+	AllowStaleRefreshChain bool
 }
 
-func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string, smsCfg auth.SMSCountryConfig) *AuthHandler {
+func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string, smsCfg auth.SMSCountryConfig, allowStaleRefreshChain bool) *AuthHandler {
 	return &AuthHandler{
-		AuthStore: authStore,
-		EventBus:  eventBus,
-		JWTSecret: jwtSecret,
-		SMSCfg:    smsCfg,
+		AuthStore:              authStore,
+		EventBus:               eventBus,
+		JWTSecret:              jwtSecret,
+		SMSCfg:                 smsCfg,
+		AllowStaleRefreshChain: allowStaleRefreshChain,
 	}
 }
 
@@ -344,7 +347,7 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 	})
 }
 
-// V8: Token refresh endpoint
+// V8: Token refresh endpoint with chain lineage (handles cold-boot retry storms)
 func (h *AuthHandler) HandleRefreshToken(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		RefreshToken string `json:"refresh_token"`
@@ -356,36 +359,81 @@ func (h *AuthHandler) HandleRefreshToken(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// V5: Validate refresh token (checks revoked + expiry)
-	oldRT, err := h.AuthStore.ValidateRefreshToken(r.Context(), payload.RefreshToken)
+	// Look up token by hash (returns doc even if revoked/expired)
+	tokenDoc, err := h.AuthStore.LookupRefreshTokenByHash(r.Context(), payload.RefreshToken)
 	if err != nil {
 		response.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
-	if oldRT == nil {
+	if tokenDoc == nil {
 		response.Error(w, "Invalid or expired refresh token", http.StatusUnauthorized)
 		return
 	}
 
-	// Rotate: revoke old, create new
-	_ = h.AuthStore.RevokeRefreshToken(r.Context(), payload.RefreshToken)
-
-	newAccessToken, err := auth.GenerateAccessToken(oldRT.UserID, oldRT.Role, h.JWTSecret)
-	if err != nil {
-		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
-		return
+	// Attempt 1: If token is live, rotate it (fast path)
+	if !tokenDoc.Revoked && time.Now().Before(tokenDoc.ExpiresAt) {
+		newRT, newTokenStr, err := h.AuthStore.RotateById(r.Context(), tokenDoc, payload.DeviceID, payload.DeviceName)
+		if err == nil {
+			newAccessToken, err := auth.GenerateAccessToken(newRT.UserID, newRT.Role, h.JWTSecret)
+			if err != nil {
+				response.Error(w, "Failed to generate token", http.StatusInternalServerError)
+				return
+			}
+			response.Success(w, http.StatusOK, map[string]string{
+				"access_token":  newAccessToken,
+				"refresh_token": newTokenStr,
+			})
+			return
+		}
+		if err != auth.ErrTokenAlreadyRevoked {
+			// Transient DB error — don't mask as auth failure
+			logger.Log.Error().Err(err).Msg("Refresh token rotation failed")
+			response.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		// Race: token was revoked between our check and the update — fall through to chain follower
 	}
 
-	newRefreshToken, _, err := h.AuthStore.CreateRefreshToken(r.Context(), oldRT.UserID, oldRT.Role, payload.DeviceID, payload.DeviceName)
-	if err != nil {
-		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
-		return
+	// Attempt 2: Token is revoked — follow the superseded_by chain (only when gated)
+	if h.AllowStaleRefreshChain && tokenDoc.SupersededBy != primitive.NilObjectID {
+		liveToken, err := h.AuthStore.FindLiveInChain(r.Context(), tokenDoc)
+		if err != nil {
+			if err == auth.ErrBrokenChain || err == auth.ErrCycleDetected {
+				logger.Log.Error().Err(err).Str("token_id", tokenDoc.ID.Hex()).Msg("Token chain corrupted")
+				response.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			if err != auth.ErrNoLiveToken {
+				logger.Log.Error().Err(err).Str("token_id", tokenDoc.ID.Hex()).Msg("FindLiveInChain failed")
+				response.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			// ErrNoLiveToken — legitimate end of chain, fall through to 401
+		} else {
+			// Found live token deeper in the chain — rotate it to issue a new string
+			newRT, newTokenStr, err := h.AuthStore.RotateById(r.Context(), liveToken, payload.DeviceID, payload.DeviceName)
+			if err == nil {
+				newAccessToken, err := auth.GenerateAccessToken(newRT.UserID, newRT.Role, h.JWTSecret)
+				if err != nil {
+					response.Error(w, "Failed to generate token", http.StatusInternalServerError)
+					return
+				}
+				response.Success(w, http.StatusOK, map[string]string{
+					"access_token":  newAccessToken,
+					"refresh_token": newTokenStr,
+				})
+				return
+			}
+			if err != auth.ErrTokenAlreadyRevoked {
+				logger.Log.Error().Err(err).Msg("Chain rotation failed")
+				response.Error(w, "Internal error", http.StatusInternalServerError)
+				return
+			}
+			// Race: live token was already rotated — fall through to 401
+		}
 	}
 
-	response.Success(w, http.StatusOK, map[string]string{
-		"access_token":  newAccessToken,
-		"refresh_token": newRefreshToken,
-	})
+	response.Error(w, "Invalid or expired refresh token", http.StatusUnauthorized)
 }
 
 // V4: Logout endpoint
@@ -394,7 +442,9 @@ func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 	role, _ := r.Context().Value(middleware.UserRoleKey).(string)
 
 	// Revoke all refresh tokens for this user
-	_ = h.AuthStore.RevokeAllUserRefreshTokens(r.Context(), userID)
+	if err := h.AuthStore.RevokeAllUserRefreshTokens(r.Context(), userID); err != nil {
+		logger.Log.Error().Err(err).Str("user_id", userID).Msg("Failed to revoke all refresh tokens on logout")
+	}
 
 	// Clear stored JWT
 	objID, err := primitive.ObjectIDFromHex(userID)
