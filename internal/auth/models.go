@@ -108,7 +108,8 @@ type RefreshToken struct {
 	DeviceName string             `bson:"device_name,omitempty" json:"device_name,omitempty"`
 	CreatedAt  time.Time          `bson:"created_at" json:"created_at"`
 	ExpiresAt  time.Time          `bson:"expires_at" json:"expires_at"`
-	Revoked    bool               `bson:"revoked" json:"revoked"`
+	Revoked     bool               `bson:"revoked" json:"revoked"`
+	SupersededBy primitive.ObjectID `bson:"superseded_by,omitempty" json:"superseded_by,omitempty"`
 }
 
 type OTPAttempt struct {
