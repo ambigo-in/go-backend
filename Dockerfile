@@ -56,7 +56,7 @@ WORKDIR /home/appuser
 USER appuser
 
 # Expose port (Cloud Run uses PORT env variable, default 8080)
-EXPOSE 8080
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
