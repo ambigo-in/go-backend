@@ -34,7 +34,7 @@ FROM debian:trixie-slim
 
 # Install runtime dependencies
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends ca-certificates tzdata && \
+    apt-get install -y --no-install-recommends ca-certificates tzdata wget && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy the H3 native library from builder and the built binary
@@ -55,12 +55,12 @@ WORKDIR /home/appuser
 # Switch to non-root user
 USER appuser
 
-# Expose port (Cloud Run uses PORT env variable, default 8080)
+# Expose port (Cloud Run uses the PORT env variable, default 8080)
 EXPOSE 8080
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
-    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+    CMD wget --no-verbose --tries=1 --spider http://localhost:8080/api/v1/health || exit 1
 
 # Run the application
 CMD ["./server"]
