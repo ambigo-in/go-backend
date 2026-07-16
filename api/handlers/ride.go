@@ -101,7 +101,15 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 	if req.AmbTypeID == "" {
 		candidates, err := h.Dispatcher.Matcher.FindBestDrivers(r.Context(), req.PickupLat, req.PickupLng, 5, "")
 		if err != nil || len(candidates) == 0 {
-			response.Error(w, "No ambulances available nearby", http.StatusNotFound)
+			availableTypes := h.Dispatcher.Matcher.FindAvailableOtherTypes(req.PickupLat, req.PickupLng, "")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          http.StatusText(http.StatusNotFound),
+				"detail":         "No ambulances available nearby",
+				"code":           http.StatusNotFound,
+				"available_types": availableTypes,
+			})
 			return
 		}
 		for _, candidate := range candidates {
@@ -116,7 +124,15 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 		if req.AmbTypeID == "" {
-			response.Error(w, "No eligible ambulances available nearby", http.StatusNotFound)
+			availableTypes := h.Dispatcher.Matcher.FindAvailableOtherTypes(req.PickupLat, req.PickupLng, "")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"error":          http.StatusText(http.StatusNotFound),
+				"detail":         "No eligible ambulances available nearby",
+				"code":           http.StatusNotFound,
+				"available_types": availableTypes,
+			})
 			return
 		}
 	}
@@ -192,8 +208,9 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			totalAmount := base + emergency + night
 			totalAmount = float64(int(totalAmount*100)) / 100
 
-			// Calculate Driver Share
-			dBase := h.PricingEngine.CalculateBaseAndDistanceFare(distanceKm, ambType.DriverShare, pricingTiers)
+			// Calculate Driver Share (DriverShare is a percentage of BaseFare)
+			driverBaseFare := ambType.BaseFare * ambType.DriverShare / 100.0
+			dBase := h.PricingEngine.CalculateBaseAndDistanceFare(distanceKm, driverBaseFare, pricingTiers)
 			dEmergency := h.PricingEngine.CalculateEmergencySurcharge(dBase, newRide.EmergencyPriority > 0)
 			dNight := h.PricingEngine.CalculateNightSurcharge(dBase, time.Now())
 			driverShareTotal := dBase + dEmergency + dNight
@@ -801,7 +818,8 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
 		total := float64(int((base+emergency+night)*100)) / 100
 
-		dBase := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, ambType.DriverShare, pricingTiers)
+		driverBaseFare := ambType.BaseFare * ambType.DriverShare / 100.0
+		dBase := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, driverBaseFare, pricingTiers)
 		dEmergency := h.PricingEngine.CalculateEmergencySurcharge(dBase, req.IsSOS)
 		dNight := h.PricingEngine.CalculateNightSurcharge(dBase, time.Now())
 		driverShare := float64(int((dBase+dEmergency+dNight)*100)) / 100
@@ -850,7 +868,8 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
 		total := float64(int((base+emergency+night)*100)) / 100
 
-		dBase := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, ambType.DriverShare, pricingTiers)
+		driverBaseFare := ambType.BaseFare * ambType.DriverShare / 100.0
+		dBase := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, driverBaseFare, pricingTiers)
 		dEmergency := h.PricingEngine.CalculateEmergencySurcharge(dBase, req.IsSOS)
 		dNight := h.PricingEngine.CalculateNightSurcharge(dBase, time.Now())
 		driverShare := float64(int((dBase+dEmergency+dNight)*100)) / 100

@@ -319,6 +319,11 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 		driverID = unverifiedDriver.ID
 	}
 
+	// Revoke all previous sessions so only this device stays logged in
+	if err := h.AuthStore.RevokeAllUserRefreshTokens(r.Context(), driverID.Hex()); err != nil {
+		logger.Log.Error().Err(err).Str("driver_id", driverID.Hex()).Msg("Failed to revoke old driver sessions")
+	}
+
 	accessToken, err := auth.GenerateAccessToken(driverID.Hex(), role, h.JWTSecret)
 	if err != nil {
 		response.Error(w, "Failed to generate token", http.StatusInternalServerError)

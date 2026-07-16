@@ -12,8 +12,8 @@ import (
 type Feedback struct {
 	ID        primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
 	UserID    string             `bson:"user_id" json:"user_id"`
-	DriverID  string             `bson:"driver_id" json:"driver_id" validate:"required"`
-	RideID    string             `bson:"ride_id" json:"ride_id" validate:"required"`
+	DriverID  string             `bson:"driver_id" json:"driver_id"`
+	RideID    string             `bson:"ride_id" json:"ride_id"`
 	Rating    float64            `bson:"rating" json:"rating" validate:"required,min=1,max=5"`
 	Content   string             `bson:"content" json:"content"`
 	CreatedAt time.Time          `bson:"created_at" json:"created_at"`

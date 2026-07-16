@@ -78,6 +78,19 @@ func (m *Manager) Run() {
 			m.mu.Lock()
 			if m.clients[client.Role][client.ID] == nil {
 				m.clients[client.Role][client.ID] = make(map[*Client]bool)
+			} else {
+				// Kick existing connections for the same (role, id) — only the latest stays
+				for oldClient := range m.clients[client.Role][client.ID] {
+					select {
+					case oldClient.Send <- []byte(`{"type":"SESSION_REPLACED"}`):
+					default:
+					}
+					close(oldClient.Send)
+					oldClient.Conn.Close()
+					metrics.ActiveConnections.Dec()
+				}
+				// Replace with empty map — unregister won't find old clients, so no double-close
+				m.clients[client.Role][client.ID] = make(map[*Client]bool)
 			}
 			m.clients[client.Role][client.ID][client] = true
 			m.mu.Unlock()
