@@ -36,6 +36,23 @@ func (s *FeedbackStore) InsertFeedback(ctx context.Context, f *Feedback) error {
 	return err
 }
 
+func (s *FeedbackStore) ListAllFeedback(ctx context.Context) ([]Feedback, error) {
+	cursor, err := s.feedback.Find(ctx, bson.M{})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var list []Feedback
+	if err = cursor.All(ctx, &list); err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = []Feedback{}
+	}
+	return list, nil
+}
+
 func (s *FeedbackStore) ListFeedback(ctx context.Context, driverID string) ([]Feedback, error) {
 	cursor, err := s.feedback.Find(ctx, bson.M{"driver_id": driverID})
 	if err != nil {

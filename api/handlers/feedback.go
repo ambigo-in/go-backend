@@ -45,6 +45,17 @@ func (h *FeedbackHandler) HandleSubmitFeedback(w http.ResponseWriter, r *http.Re
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Feedback submitted successfully"})
 }
 
+func (h *FeedbackHandler) HandleAdminListFeedback(w http.ResponseWriter, r *http.Request) {
+	list, err := h.FeedbackStore.ListAllFeedback(r.Context())
+	if err != nil {
+		response.Error(w, "Failed to list feedback", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(list)
+}
+
 func (h *FeedbackHandler) HandleListFeedback(w http.ResponseWriter, r *http.Request) {
 	// Driver fetching their own feedback
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
