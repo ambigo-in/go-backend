@@ -685,3 +685,64 @@ func (s *Store) RejectUnverifiedDriver(ctx context.Context, id primitive.ObjectI
 	})
 	return err
 }
+
+// ---- Referral Code Management (V20) ----
+
+// SetUserReferralCode sets the user's own shareable referral code.
+func (s *Store) SetUserReferralCode(ctx context.Context, userID primitive.ObjectID, code string) error {
+	_, err := s.users.UpdateOne(ctx, bson.M{"_id": userID}, bson.M{
+		"$set": bson.M{"my_referral_code": code},
+	})
+	return err
+}
+
+// SetDriverReferralCode sets the driver's own shareable referral code.
+func (s *Store) SetDriverReferralCode(ctx context.Context, driverID primitive.ObjectID, code string) error {
+	_, err := s.drivers.UpdateOne(ctx, bson.M{"_id": driverID}, bson.M{
+		"$set": bson.M{"my_referral_code": code},
+	})
+	return err
+}
+
+// FindUserByReferralCode finds a user by their personal referral code (my_referral_code).
+func (s *Store) FindUserByReferralCode(ctx context.Context, code string) (*User, error) {
+	var user User
+	err := s.users.FindOne(ctx, bson.M{"my_referral_code": code}).Decode(&user)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &user, nil
+}
+
+// FindDriverByReferralCode finds a driver by their personal referral code (my_referral_code).
+func (s *Store) FindDriverByReferralCode(ctx context.Context, code string) (*Driver, error) {
+	var driver Driver
+	err := s.drivers.FindOne(ctx, bson.M{"my_referral_code": code}).Decode(&driver)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &driver, nil
+}
+
+// GetUserFCMToken retrieves a user's FCM token for push notifications.
+func (s *Store) GetUserFCMToken(ctx context.Context, userID string) (*string, error) {
+	objID, err := primitive.ObjectIDFromHex(userID)
+	if err != nil {
+		return nil, err
+	}
+	var user User
+	err = s.users.FindOne(ctx, bson.M{"_id": objID}).Decode(&user)
+	if err != nil {
+		if err == mongo.ErrNoDocuments {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return user.FCMToken, nil
+}

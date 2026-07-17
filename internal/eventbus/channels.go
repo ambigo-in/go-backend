@@ -26,6 +26,7 @@ const (
 	ChannelAdminOfferCreated    = "admin:offer_created"
 	ChannelAdminOfferDeleted    = "admin:offer_deleted"
 	ChannelAdminDriverRejected = "admin:driver_rejected"
+	ChannelReferralCredited    = "referral:credited"
 )
 
 // RideRequestedPayload is published when a user requests a ride
@@ -208,4 +209,14 @@ type AdminOfferPayload struct {
 type AdminDriverRejectedPayload struct {
 	DriverID  string `json:"driver_id"`
 	RequestID string `json:"request_id,omitempty"`
+}
+
+// ReferralCreditedPayload is published when a referral reward is credited
+type ReferralCreditedPayload struct {
+	RecordID      string  `json:"record_id"`
+	RecipientID   string  `json:"recipient_id"`
+	RecipientRole string  `json:"recipient_role"` // "user" or "driver"
+	Amount        float64 `json:"amount"`
+	Reason        string  `json:"reason"` // "signup_referral", "ride_threshold_met", "welcome_bonus"
+	RequestID     string  `json:"request_id,omitempty"`
 }

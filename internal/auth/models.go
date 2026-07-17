@@ -11,13 +11,14 @@ type GeoJSONPoint struct {
 }
 
 type User struct {
-	ID           primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
-	Name         string             `bson:"name" json:"name"`
-	Mobile       string             `bson:"mobile" json:"mobile"`
-	ReferralCode string             `bson:"referral_code" json:"referral_code"`
-	Location     *GeoJSONPoint      `bson:"location,omitempty" json:"location,omitempty"`
-	FCMToken     *string            `bson:"fcm_token,omitempty" json:"fcm_token,omitempty"`
-	JWTToken     *string            `bson:"jwt_token,omitempty" json:"jwt_token,omitempty"`
+	ID             primitive.ObjectID `bson:"_id,omitempty" json:"_id"`
+	Name           string             `bson:"name" json:"name"`
+	Mobile         string             `bson:"mobile" json:"mobile"`
+	ReferralCode   string             `bson:"referral_code" json:"referral_code"`
+	MyReferralCode string             `bson:"my_referral_code,omitempty" json:"my_referral_code,omitempty"`
+	Location       *GeoJSONPoint      `bson:"location,omitempty" json:"location,omitempty"`
+	FCMToken       *string            `bson:"fcm_token,omitempty" json:"fcm_token,omitempty"`
+	JWTToken       *string            `bson:"jwt_token,omitempty" json:"jwt_token,omitempty"`
 }
 
 type DriverDetails struct {
@@ -47,6 +48,7 @@ type Driver struct {
 	WalletDetails      WalletDetails      `bson:"wallet_details" json:"wallet_details"`
 	WalletBalance      float64            `bson:"wallet_balance" json:"wallet_balance"`
 	ReferralCode       string             `bson:"referral_code" json:"referral_code"`
+	MyReferralCode     string             `bson:"my_referral_code,omitempty" json:"my_referral_code,omitempty"`
 	Location           *GeoJSONPoint      `bson:"location,omitempty" json:"location,omitempty"`
 	FCMToken           *string            `bson:"fcm_token,omitempty" json:"fcm_token,omitempty"`
 	JWTToken           *string            `bson:"jwt_token,omitempty" json:"jwt_token,omitempty"`

@@ -22,6 +22,7 @@ import (
 	"ambigo-backend/internal/notification"
 	"ambigo-backend/internal/offer"
 	"ambigo-backend/internal/payment"
+	"ambigo-backend/internal/referral"
 	"ambigo-backend/internal/ride"
 	"ambigo-backend/internal/telephony"
 	"ambigo-backend/internal/translation"
@@ -84,8 +85,10 @@ func main() {
 	offerStore := offer.NewStore(recordsDB)
 	walletStore := payment.NewWalletStore(recordsDB, usersDB)
 	feedbackStore := ride.NewFeedbackStore(recordsDB)
+	referralStore := referral.NewStore(dataDB, recordsDB)
 
 	// Initialize Services & Dispatcher
+	referralService := referral.NewService(referralStore, authStore, offerStore, walletStore, eventBus)
 	wsManager := websocket.NewManager(locationStore, authStore, eventBus)
 	go wsManager.Run() // Start WebSocket Hub
 	
@@ -109,7 +112,7 @@ func main() {
 	zwitchService := payment.NewZwitchService(appConfig.ZwitchKey, appConfig.ZwitchSecret, appConfig.ZwitchAccountID, appConfig.ZwitchAPIBaseURL)
 
 	// Initialize Handlers
-	rideHandler := handlers.NewRideHandler(dispatcher, eventBus, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore)
+	rideHandler := handlers.NewRideHandler(dispatcher, eventBus, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore, referralService)
 	smsCfg := auth.SMSCountryConfig{
 		APIKey:     os.Getenv("SMS_COUNTRY_KEY"),
 		APIToken:   os.Getenv("SMS_COUNTRY_TOKEN"),
@@ -117,7 +120,7 @@ func main() {
 		SenderID:   appConfig.SMSSenderID,
 		CC:         appConfig.SMSCC,
 	}
-	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg, appConfig.AllowStaleRefreshChain)
+	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg, appConfig.AllowStaleRefreshChain, referralService)
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, appConfig.RazorpayWebhookSecret)
@@ -126,6 +129,7 @@ func main() {
 	sharedHandler := handlers.NewSharedHandler(cloudshopeService, counterStore, adminStore, hospitalStore)
 	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackStore)
+	referralHandler := handlers.NewReferralHandler(referralStore, referralService)
 
 	// V16: Audit persistence
 	auditStore := admin.NewAuditStore(recordsDB)
@@ -262,6 +266,9 @@ func main() {
 	mux.Handle("POST /api/v2/user/profile", requireUser(profileHandler.HandleGetUserProfile))
 	mux.Handle("POST /api/v2/user/fcm", requireUser(profileHandler.HandleUpdateUserFCM))
 	
+	// Referral Endpoints (Protected)
+	mux.Handle("POST /api/v2/referral/rewards", jwtAuth(http.HandlerFunc(referralHandler.HandleGetRewards)))
+
 	// V10: driver/profile and driver/fcm allow both driver and unvrf_driver roles
 	mux.Handle("POST /api/v2/driver/profile", requireDriverOrUnvrf(profileHandler.HandleGetDriverProfile))
 	mux.Handle("POST /api/v2/driver/fcm", requireDriverOrUnvrf(profileHandler.HandleUpdateDriverFCM))
@@ -315,6 +322,9 @@ func main() {
 	mux.Handle("POST /api/v2/admin/offers", requireAdmin(http.HandlerFunc(offerHandler.HandleCreate)))
 	mux.Handle("GET /api/v2/admin/offers", requireAdmin(http.HandlerFunc(offerHandler.HandleList)))
 	mux.Handle("DELETE /api/v2/admin/offers/{id}", requireAdmin(http.HandlerFunc(offerHandler.HandleDelete)))
+	// Admin: Referral Config
+	mux.Handle("GET /api/v2/admin/referral/config", requireAdmin(http.HandlerFunc(referralHandler.HandleGetConfig)))
+	mux.Handle("POST /api/v2/admin/referral/config", requireAdmin(http.HandlerFunc(referralHandler.HandleSaveConfig)))
 
 	// Apply API key auth + global rate limiter to all routes except /metrics, /health, and /ws
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

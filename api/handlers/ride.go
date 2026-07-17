@@ -17,6 +17,7 @@ import (
 	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/payment"
+	"ambigo-backend/internal/referral"
 	"ambigo-backend/internal/requestid"
 	"ambigo-backend/internal/pricing"
 	"ambigo-backend/internal/ride"
@@ -34,9 +35,10 @@ type RideHandler struct {
 	RouteClient     *dispatch.RouteClient
 	PricingEngine   *pricing.Engine
 	WalletStore     *payment.WalletStore
+	ReferralService *referral.Service
 }
 
-func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemoryBus, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore) *RideHandler {
+func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemoryBus, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore, referralService *referral.Service) *RideHandler {
 	return &RideHandler{
 		Dispatcher:      dispatcher,
 		EventBus:        eventBus,
@@ -47,6 +49,7 @@ func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemory
 		RouteClient:     routeClient,
 		PricingEngine:   pricing.NewEngine(),
 		WalletStore:     walletStore,
+		ReferralService: referralService,
 	}
 }
 
@@ -507,6 +510,11 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		DropAddress: req.DropAddress,
 		RequestID:   reqID,
 	})
+
+	// V20: Process referral ride completion
+	if h.ReferralService != nil {
+		go h.ReferralService.ProcessRideCompletion(context.Background(), rideData.UserID, driverID)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{

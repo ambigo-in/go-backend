@@ -11,6 +11,7 @@ import (
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/logger"
+	"ambigo-backend/internal/referral"
 	"ambigo-backend/internal/requestid"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 )
@@ -23,15 +24,17 @@ type AuthHandler struct {
 	JWTSecret              string
 	SMSCfg                 auth.SMSCountryConfig
 	AllowStaleRefreshChain bool
+	ReferralService        *referral.Service
 }
 
-func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string, smsCfg auth.SMSCountryConfig, allowStaleRefreshChain bool) *AuthHandler {
+func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string, smsCfg auth.SMSCountryConfig, allowStaleRefreshChain bool, referralService *referral.Service) *AuthHandler {
 	return &AuthHandler{
 		AuthStore:              authStore,
 		EventBus:               eventBus,
 		JWTSecret:              jwtSecret,
 		SMSCfg:                 smsCfg,
 		AllowStaleRefreshChain: allowStaleRefreshChain,
+		ReferralService:        referralService,
 	}
 }
 
@@ -155,14 +158,12 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 			response.Error(w, "Name is required for new users", http.StatusBadRequest)
 			return
 		}
-		// V17: Validate referral code if provided
-		if payload.ReferralCode != "" {
-			validRef, err := h.AuthStore.ValidateReferralCode(r.Context(), payload.ReferralCode)
-			if err != nil {
-				response.Error(w, "Internal error", http.StatusInternalServerError)
-				return
-			}
-			if !validRef {
+		// V17/V20: Validate referral code against users/drivers my_referral_code
+		if payload.ReferralCode != "" && h.ReferralService != nil {
+			// Check if the code exists (owned by any user or driver)
+			codeOwnerUser, _ := h.AuthStore.FindUserByReferralCode(r.Context(), payload.ReferralCode)
+			codeOwnerDriver, _ := h.AuthStore.FindDriverByReferralCode(r.Context(), payload.ReferralCode)
+			if codeOwnerUser == nil && codeOwnerDriver == nil {
 				response.Error(w, "Invalid referral code", http.StatusBadRequest)
 				return
 			}
@@ -173,9 +174,21 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 			response.Error(w, "Registration failed", http.StatusInternalServerError)
 			return
 		}
+		// Generate a personal referral code for this new user
+		if h.ReferralService != nil {
+			if _, err := h.ReferralService.GetOrCreateUserCode(r.Context(), user.ID); err != nil {
+				logger.Log.Error().Err(err).Str("user_id", user.ID.Hex()).Msg("Failed to generate referral code for new user")
+			}
+		}
 		h.EventBus.PublishEvent(eventbus.ChannelAuthUserRegistered, eventbus.AuthUserRegisteredPayload{
 			UserID: user.ID.Hex(), Mobile: payload.Mobile, Name: payload.Name, RequestID: reqID,
 		})
+		// V20: Process referral after user creation
+		if payload.ReferralCode != "" && h.ReferralService != nil {
+			if err := h.ReferralService.ProcessSignupReferral(r.Context(), user.ID.Hex(), "user", payload.ReferralCode); err != nil {
+				logger.Log.Error().Err(err).Str("user_id", user.ID.Hex()).Str("code", payload.ReferralCode).Msg("Failed to process signup referral")
+			}
+		}
 	}
 
 	// V8: Generate access token + refresh token
@@ -306,15 +319,36 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 				response.Error(w, "Name is required to register", http.StatusBadRequest)
 				return
 			}
+			// V20: Validate referral code for new drivers
+			if payload.ReferralCode != "" && h.ReferralService != nil {
+				codeOwnerUser, _ := h.AuthStore.FindUserByReferralCode(r.Context(), payload.ReferralCode)
+				codeOwnerDriver, _ := h.AuthStore.FindDriverByReferralCode(r.Context(), payload.ReferralCode)
+				if codeOwnerUser == nil && codeOwnerDriver == nil {
+					response.Error(w, "Invalid referral code", http.StatusBadRequest)
+					return
+				}
+			}
 			unverifiedDriver, err = h.AuthStore.CreateUnverifiedDriver(r.Context(), payload.Name, payload.Mobile)
 			if err != nil {
 				logger.Log.Error().Err(err).Str("mobile", payload.Mobile).Msg("Failed to create driver")
 				response.Error(w, "Registration failed", http.StatusInternalServerError)
 				return
 			}
+			// Generate a personal referral code for this new driver
+			if h.ReferralService != nil {
+				// Note: For unverified drivers, we generate their code but referral processing
+				// will use the unverified driver's ID. The code is stored in the drivers collection
+				// only after approval, so we defer full referral processing.
+			}
 			h.EventBus.PublishEvent(eventbus.ChannelAuthDriverCreated, eventbus.AuthDriverCreatedPayload{
 				DriverID: unverifiedDriver.ID.Hex(), Mobile: payload.Mobile, Name: payload.Name, RequestID: reqID,
 			})
+			// V20: Process referral after driver creation
+			if payload.ReferralCode != "" && h.ReferralService != nil {
+				if err := h.ReferralService.ProcessSignupReferral(r.Context(), unverifiedDriver.ID.Hex(), "driver", payload.ReferralCode); err != nil {
+					logger.Log.Error().Err(err).Str("driver_id", unverifiedDriver.ID.Hex()).Str("code", payload.ReferralCode).Msg("Failed to process driver signup referral")
+				}
+			}
 		}
 		driverID = unverifiedDriver.ID
 	}

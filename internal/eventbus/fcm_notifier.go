@@ -24,6 +24,7 @@ func NewFCMNotifier(fcmClient *notification.FCMClient, authStore *auth.Store) *F
 func (n *FCMNotifier) SubscribeTo(bus *InMemoryBus) {
 	bus.Subscribe(ChannelRideDriverOffered, n.handleRideOffered)
 	bus.Subscribe(ChannelAuthDriverApproved, n.handleDriverApproved)
+	bus.Subscribe(ChannelReferralCredited, n.handleReferralCredited)
 }
 
 func (n *FCMNotifier) handleRideOffered(payload []byte) {
@@ -108,5 +109,59 @@ func (n *FCMNotifier) handleDriverApproved(payload []byte) {
 
 	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
 		ll.Error().Err(err).Str("driver_id", p.DriverID).Msg("Welcome FCM push failed for driver")
+	}
+}
+
+// handleReferralCredited sends a push notification when a referral reward is credited.
+func (n *FCMNotifier) handleReferralCredited(payload []byte) {
+	var p ReferralCreditedPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "referral:credited").Msg("Unmarshal error")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var token *string
+	var err error
+
+	switch p.RecipientRole {
+	case "driver":
+		token, err = n.authStore.GetDriverFCMToken(ctx, p.RecipientID)
+	case "user":
+		token, err = n.authStore.GetUserFCMToken(ctx, p.RecipientID)
+	default:
+		return
+	}
+
+	if err != nil || token == nil || *token == "" {
+		return
+	}
+
+	// Build notification message based on reason
+	var title, body string
+	switch p.Reason {
+	case "signup_referral":
+		title = "🎉 Referral Bonus!"
+		body = fmt.Sprintf("Your friend signed up! ₹%.0f credit added!", p.Amount)
+	case "ride_threshold_met":
+		title = "🎉 Referral Reward!"
+		body = fmt.Sprintf("Your referral completed the required rides! ₹%.0f added to your wallet!", p.Amount)
+	case "welcome_bonus":
+		title = "🎉 Welcome Bonus!"
+		body = fmt.Sprintf("₹%.0f referral credit added to your account!", p.Amount)
+	default:
+		title = "🎉 Referral Reward!"
+		body = fmt.Sprintf("₹%.0f referral credit added!", p.Amount)
+	}
+
+	data := map[string]string{
+		"title": title,
+		"body":  body,
+	}
+
+	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+		logger.Log.Error().Err(err).Str("recipient_id", p.RecipientID).Msg("Referral FCM push failed")
 	}
 }

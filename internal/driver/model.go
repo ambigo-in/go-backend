@@ -21,6 +21,7 @@ type Driver struct {
 	Mobile         string             `bson:"mobile" json:"mobile"`
 	Name           string             `bson:"name" json:"name"`
 	ReferralCode   string             `bson:"referral_code" json:"referral_code"`
+	MyReferralCode string             `bson:"my_referral_code,omitempty" json:"my_referral_code,omitempty"`
 	VehicleDetails VehicleDetails     `bson:"vehicle_details" json:"vehicle_details"`
 	Wallet         Wallet             `bson:"wallet" json:"wallet"`
 	CreatedAt      time.Time          `bson:"created_at" json:"created_at"`
