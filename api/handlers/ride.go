@@ -457,6 +457,22 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		finalAmount = 50.0
 	}
 
+	// Apply referral credit discount
+	referralDiscount := 0.0
+	if h.ReferralService != nil {
+		discount, err := h.ReferralService.ConsumeUserReferralCredit(r.Context(), rideData.UserID)
+		if err == nil {
+			referralDiscount = discount
+		} else {
+			logger.Log.Error().Err(err).Str("user_id", rideData.UserID).Msg("Failed to consume referral credit")
+		}
+	}
+
+	userAmount := finalAmount - referralDiscount
+	if userAmount < 0 {
+		userAmount = 0
+	}
+
 	paymentDesc := fmt.Sprintf("Charges for ride to %s", req.DropAddress)
 	pmt := &payment.Payment{
 		UserID:         rideData.UserID,
@@ -464,13 +480,13 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		RideID:         rideID,
 		Description:    paymentDesc,
 		OriginalAmount: finalAmount,
-		ChargedAmount:  finalAmount,
+		ChargedAmount:  userAmount,
 		PaymentMode:    payment.PaymentMode(req.PaymentMode),
 		CreatedAt:      time.Now(),
 	}
 
 	if req.PaymentMode == "online" {
-		orderID, err := h.RazorpayService.CreateOrder(finalAmount, rideID)
+		orderID, err := h.RazorpayService.CreateOrder(userAmount, rideID)
 		if err == nil {
 			pmt.RazorpayOrderID = &orderID
 		}
@@ -480,7 +496,7 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		pmt.PaidAt = &now
 	}
 
-	// Settle driver wallet
+	// Settle driver wallet (using original fare total — platform absorbs referral cost)
 	driverObjID, _ := primitive.ObjectIDFromHex(driverID)
 	if rideData.Fare != nil && driverObjID.Hex() != "" {
 		if req.PaymentMode == "online" {
@@ -493,6 +509,15 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Persist referral discount in ride fare for history & driver wallet eventual consistency
+	if referralDiscount > 0 && rideData.Fare != nil {
+		rideData.Fare.ReferralDiscount = referralDiscount
+		rideData.Fare.Total = userAmount
+		if err := h.Dispatcher.RideStore.UpdateRideFare(r.Context(), rideID, rideData.Fare); err != nil {
+			logger.Log.Error().Err(err).Str("ride_id", rideID).Msg("Failed to update ride fare with referral discount")
+		}
+	}
+
 	h.PaymentStore.CreatePayment(r.Context(), pmt)
 
 	h.EventBus.PublishEvent(eventbus.ChannelRideCompleted, eventbus.RideCompletedPayload{
@@ -500,7 +525,7 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		DriverID:    driverID,
 		UserID:      rideData.UserID,
 		PaymentMode: req.PaymentMode,
-		FinalAmount: finalAmount,
+		FinalAmount: userAmount,
 		DriverShare: func() float64 {
 			if rideData.Fare != nil {
 				return rideData.Fare.DriverShare
@@ -522,7 +547,7 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		"payment_id":        pmt.ID.Hex(),
 		"razorpay_order_id": pmt.RazorpayOrderID,
 		"take_cash":         req.PaymentMode != "online",
-		"amount":            finalAmount,
+		"amount":            userAmount,
 	})
 }
 

@@ -36,6 +36,7 @@ type Fare struct {
 	WaitingCharge      float64 `bson:"waiting_charge" json:"waiting_charge"`
 	Total              float64 `bson:"total" json:"total"`
 	DriverShare        float64 `bson:"driver_share" json:"driver_share"`
+	ReferralDiscount   float64 `bson:"referral_discount,omitempty" json:"referral_discount,omitempty"`
 	Currency           string  `bson:"currency" json:"currency"`
 }
 

@@ -57,3 +57,20 @@ func (s *Store) Delete(ctx context.Context, id primitive.ObjectID) error {
 	_, err := s.collection.DeleteOne(ctx, bson.M{"_id": id})
 	return err
 }
+
+func (s *Store) FindByUserID(ctx context.Context, userID string) ([]Offer, error) {
+	cursor, err := s.collection.Find(ctx, bson.M{"user_id": userID})
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var list []Offer
+	if err = cursor.All(ctx, &list); err != nil {
+		return nil, err
+	}
+	if list == nil {
+		list = []Offer{}
+	}
+	return list, nil
+}

@@ -81,7 +81,11 @@ func (n *WSNotifier) handleRideCompleted(payload []byte) {
 		return
 	}
 	n.wsManager.ClearActiveRide(p.DriverID)
-	msg := map[string]string{"ride_id": p.RideID, "status": "COMPLETED"}
+	msg := map[string]interface{}{
+		"ride_id": p.RideID,
+		"status":  "COMPLETED",
+		"amount":  p.FinalAmount,
+	}
 	n.wsManager.SendToRideWatchers(p.RideID, "RIDE_UPDATE", msg)
 }
 

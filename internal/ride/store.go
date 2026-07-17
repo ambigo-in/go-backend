@@ -211,6 +211,17 @@ func (s *Store) UpdateDispatchMetadata(ctx context.Context, rideID string, meta 
 	return err
 }
 
+func (s *Store) UpdateRideFare(ctx context.Context, rideID string, fare *Fare) error {
+	objID, err := primitive.ObjectIDFromHex(rideID)
+	if err != nil {
+		return err
+	}
+	_, err = s.collection.UpdateOne(ctx, bson.M{"_id": objID}, bson.M{
+		"$set": bson.M{"fare": fare},
+	})
+	return err
+}
+
 // CancelStaleSearchingRides cancels all rides in SEARCHING state older than maxAge.
 // Returns the count of cancelled rides and any errors encountered.
 func (s *Store) CancelStaleSearchingRides(ctx context.Context, maxAge time.Duration) (int64, error) {
