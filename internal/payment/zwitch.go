@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"time"
 
 	"ambigo-backend/internal/auth"
@@ -21,14 +22,21 @@ type ZwitchService struct {
 	Client      *http.Client
 }
 
-func NewZwitchService(key, secret, accountID, apiBaseURL string) *ZwitchService {
+func NewZwitchService(key, secret, accountID, apiBaseURL, proxyURL string) *ZwitchService {
+	transport := &http.Transport{}
+	if proxyURL != "" {
+		if u, err := url.Parse(proxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(u)
+		}
+	}
 	return &ZwitchService{
 		KeyID:      key,
 		Secret:     secret,
 		AccountID:  accountID,
 		APIBaseURL: apiBaseURL,
 		Client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout:   10 * time.Second,
+			Transport: transport,
 		},
 	}
 }
