@@ -32,6 +32,7 @@ type AppConfig struct {
 	ZwitchSecret    string
 	ZwitchAccountID string
 	ZwitchAPIBaseURL string
+	ZwitchProxyURL  string
 
 	// Cloudshope (Call Masking)
 	CloudshopeToken      string
@@ -81,6 +82,7 @@ func LoadConfig() *AppConfig {
 		ZwitchSecret:      os.Getenv("ZWITCH_SECRET"),
 		ZwitchAccountID:   os.Getenv("ZWITCH_ACCOUNT_ID"),
 		ZwitchAPIBaseURL:  envOrDefault("ZWITCH_API_BASE_URL", "https://api.zwitch.io/v1"),
+		ZwitchProxyURL:    os.Getenv("ZWITCH_PROXY_URL"),
 
 		CloudshopeToken:      os.Getenv("CLOUDSHOPE_TOKEN"),
 		CloudshopeNumber:     os.Getenv("CLOUDSHOPE_NUMBER"),
