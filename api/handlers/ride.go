@@ -474,6 +474,10 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	paymentDesc := fmt.Sprintf("Charges for ride to %s", req.DropAddress)
+	driverShare := 0.0
+	if rideData.Fare != nil {
+		driverShare = rideData.Fare.DriverShare
+	}
 	pmt := &payment.Payment{
 		UserID:         rideData.UserID,
 		PartnerID:      driverID,
@@ -481,6 +485,7 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		Description:    paymentDesc,
 		OriginalAmount: finalAmount,
 		ChargedAmount:  userAmount,
+		DriverShare:    driverShare,
 		PaymentMode:    payment.PaymentMode(req.PaymentMode),
 		CreatedAt:      time.Now(),
 	}
@@ -494,19 +499,6 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		pmt.Paid = true
 		now := time.Now()
 		pmt.PaidAt = &now
-	}
-
-	// Settle driver wallet (using original fare total — platform absorbs referral cost)
-	driverObjID, _ := primitive.ObjectIDFromHex(driverID)
-	if rideData.Fare != nil && driverObjID.Hex() != "" {
-		if req.PaymentMode == "online" {
-			h.WalletStore.UpdateWalletBalance(r.Context(), driverObjID, rideData.Fare.DriverShare)
-		} else {
-			commission := rideData.Fare.Total - rideData.Fare.DriverShare
-			if commission > 0 {
-				h.WalletStore.UpdateWalletBalance(r.Context(), driverObjID, -commission)
-			}
-		}
 	}
 
 	// Persist referral discount in ride fare for history & driver wallet eventual consistency
