@@ -21,6 +21,7 @@ type Payment struct {
 	Description       string             `bson:"description" json:"description"`
 	OriginalAmount    float64            `bson:"original_amount" json:"original_amount"`
 	ChargedAmount     float64            `bson:"charged_amount" json:"charged_amount"`
+	DriverShare       float64            `bson:"driver_share" json:"driver_share"`
 	PaymentMode       PaymentMode        `bson:"payment_mode" json:"payment_mode"`
 	Paid              bool               `bson:"paid" json:"paid"`
 	RazorpayOrderID   *string            `bson:"razorpay_order_id,omitempty" json:"razorpay_order_id,omitempty"`
