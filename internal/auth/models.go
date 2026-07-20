@@ -75,12 +75,12 @@ type UnverifiedDriver struct {
 }
 
 type VerificationUpdateRequest struct {
-	PortraitImage string `json:"portrait_image"`
-	POIImage      string `json:"poi_image"`
-	DLImage       string `json:"dl_image"`
-	RCImage       string `json:"rc_image"`
-	AmbFront      string `json:"amb_front"`
-	AmbInside     string `json:"amb_inside"`
+	PortraitImage string `json:"portrait_image" validate:"required"`
+	POIImage      string `json:"poi_image"      validate:"required"`
+	DLImage       string `json:"dl_image"       validate:"required"`
+	RCImage       string `json:"rc_image"       validate:"required"`
+	AmbFront      string `json:"amb_front"      validate:"required"`
+	AmbInside     string `json:"amb_inside"     validate:"required"`
 }
 
 type AuthOTP struct {

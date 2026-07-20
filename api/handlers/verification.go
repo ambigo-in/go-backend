@@ -80,9 +80,8 @@ func (h *VerificationHandler) HandleUpdateVerification(w http.ResponseWriter, r 
 		return
 	}
 
-	var req auth.VerificationUpdateRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		response.Error(w, "Invalid payload", http.StatusBadRequest)
+	req, ok := response.DecodeJSONBody[auth.VerificationUpdateRequest](w, r, 0)
+	if !ok {
 		return
 	}
 
