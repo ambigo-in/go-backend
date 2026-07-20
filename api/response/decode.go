@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"unicode/utf8"
 
@@ -115,8 +116,11 @@ func writeAPIError(w http.ResponseWriter, r *http.Request, httpStatus int, ae AP
 	json.NewEncoder(w).Encode(map[string]any{
 		"success": false,
 		"error":   ae,
+		"detail":  ae.Message, // Backward-compatible fallback for legacy frontend expectations
+		"code":    httpStatus, // Backward-compatible fallback for legacy status code parsing
 	})
 }
+
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DecodeJSONBody — reusable generic decode helper
@@ -127,7 +131,20 @@ func writeAPIError(w http.ResponseWriter, r *http.Request, httpStatus int, ae AP
 const defaultMaxBytes int64 = 1 << 20 // 1 MB
 
 // decodeValidator is a package-level validator instance reused across requests.
-var decodeValidator = validator.New()
+// RegisterTagNameFunc instructs it to use the `json` struct tag as the field
+// name in all ValidationError messages, so fe.Field() returns "portrait_image"
+// (the JSON key) instead of "PortraitImage" (the Go identifier).
+var decodeValidator = func() *validator.Validate {
+	v := validator.New(validator.WithRequiredStructEnabled())
+	v.RegisterTagNameFunc(func(fld reflect.StructField) string {
+		name := strings.SplitN(fld.Tag.Get("json"), ",", 2)[0]
+		if name == "-" || name == "" {
+			return fld.Name // fallback to Go field name
+		}
+		return name
+	})
+	return v
+}()
 
 // DecodeJSONBody decodes a JSON request body into a value of type T, applying
 // all production-grade validations in sequence:
@@ -352,27 +369,12 @@ func mapDecodeError(w http.ResponseWriter, r *http.Request, err error) {
 	}, err)
 }
 
-// toJSONFieldName converts a validator.FieldError into the JSON key name by
-// reading the struct's json tag. Falls back to the field name if no tag exists.
+// toJSONFieldName returns the JSON field name from a validator.FieldError.
+// Because decodeValidator has a RegisterTagNameFunc that reads `json` struct
+// tags, fe.Field() already returns the JSON key (e.g. "portrait_image").
+// This helper adds a UTF-8 safety guard and nothing else.
 func toJSONFieldName(fe validator.FieldError) string {
-	// fe.Field() returns the struct field name (e.g. "PortraitImage").
-	// fe.Namespace() returns the dotted path (e.g. "VerificationUpdateRequest.PortraitImage").
-	// Neither gives us the json tag directly, so we use a lowercase conversion
-	// as the minimal safe fallback. In practice the json tags are snake_case so
-	// this matches the API surface.
-	//
-	// A more precise approach would use reflection on fe.Type() to read the
-	// json tag; we keep it simple here since our struct tags are consistent.
 	name := fe.Field()
-	// Attempt to read the json tag via the struct tag string stored in the error.
-	if ns := fe.StructNamespace(); ns != "" {
-		parts := strings.SplitN(ns, ".", 2)
-		if len(parts) == 2 {
-			// Return the last segment lowercased as a best-effort json key.
-			name = strings.ToLower(parts[1])
-		}
-	}
-	// Guarantee we produce valid UTF-8 field names.
 	if !utf8.ValidString(name) {
 		return "unknown_field"
 	}
