@@ -76,6 +76,9 @@ func (m *Manager) Run() {
 		select {
 		case client := <-m.register:
 			m.mu.Lock()
+			if m.clients[client.Role] == nil {
+				m.clients[client.Role] = make(map[string]map[*Client]bool)
+			}
 			if m.clients[client.Role][client.ID] == nil {
 				m.clients[client.Role][client.ID] = make(map[*Client]bool)
 			} else {

@@ -103,8 +103,9 @@ func (n *FCMNotifier) handleDriverApproved(payload []byte) {
 	}
 
 	data := map[string]string{
+		"type":  "ACCOUNT_APPROVED",
 		"title": "Welcome to Ambigo!",
-		"body":  "Your driver account has been approved. You can now accept rides.",
+		"body":  "Your driver account has been approved. Please login again.",
 	}
 
 	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {

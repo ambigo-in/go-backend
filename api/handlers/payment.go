@@ -22,14 +22,16 @@ type PaymentHandler struct {
 	Store              *payment.Store
 	EventBus           *eventbus.InMemoryBus
 	RazorpayService    *payment.RazorpayService
+	WalletStore        *payment.WalletStore
 	RazorpayWebhookSec string
 }
 
-func NewPaymentHandler(store *payment.Store, eventBus *eventbus.InMemoryBus, rzp *payment.RazorpayService, webhookSec string) *PaymentHandler {
+func NewPaymentHandler(store *payment.Store, eventBus *eventbus.InMemoryBus, rzp *payment.RazorpayService, walletStore *payment.WalletStore, webhookSec string) *PaymentHandler {
 	return &PaymentHandler{
 		Store:              store,
 		EventBus:           eventBus,
 		RazorpayService:    rzp,
+		WalletStore:        walletStore,
 		RazorpayWebhookSec: webhookSec,
 	}
 }
@@ -126,6 +128,14 @@ func (h *PaymentHandler) HandleProcessUserPayment(w http.ResponseWriter, r *http
 		return
 	}
 
+	// Credit driver wallet (online payment confirmed)
+	driverObjID, err := primitive.ObjectIDFromHex(pmt.PartnerID)
+	if err == nil && driverObjID.Hex() != "" && pmt.DriverShare > 0 {
+		if wErr := h.WalletStore.UpdateWalletBalance(r.Context(), driverObjID, pmt.DriverShare); wErr != nil {
+			logger.Log.Error().Err(wErr).Str("driver_id", pmt.PartnerID).Msg("Failed to credit wallet on online payment")
+		}
+	}
+
 	h.EventBus.PublishEvent(eventbus.ChannelPaymentCompleted, eventbus.PaymentCompletedPayload{
 		PaymentID: req.PaymentID, RideID: pmt.RideID,
 		UserID: pmt.UserID, DriverID: pmt.PartnerID,
@@ -182,6 +192,80 @@ func (h *PaymentHandler) HandleProcessDriverPayment(w http.ResponseWriter, r *ht
 	if err != nil {
 		response.Error(w, "Failed to mark payment as paid", http.StatusInternalServerError)
 		return
+	}
+
+	// Debit commission from driver wallet (cash collected by driver)
+	driverObjID, err := primitive.ObjectIDFromHex(pmt.PartnerID)
+	if err == nil && driverObjID.Hex() != "" {
+		commission := pmt.OriginalAmount - pmt.DriverShare
+		if commission > 0 {
+			if wErr := h.WalletStore.UpdateWalletBalance(r.Context(), driverObjID, -commission); wErr != nil {
+				logger.Log.Error().Err(wErr).Str("driver_id", pmt.PartnerID).Msg("Failed to debit commission on cash payment")
+			}
+		}
+	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelPaymentCompleted, eventbus.PaymentCompletedPayload{
+		PaymentID: objID.Hex(), RideID: pmt.RideID,
+		UserID: pmt.UserID, DriverID: pmt.PartnerID,
+		Amount: pmt.ChargedAmount, Mode: "cash", RequestID: reqID,
+	})
+
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Payment processed successfully"})
+}
+
+// HandleProcessUserCashPayment lets a user mark an unpaid payment as cash (switch from online to cash)
+func (h *PaymentHandler) HandleProcessUserCashPayment(w http.ResponseWriter, r *http.Request) {
+	_, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	reqID := requestid.FromContext(r.Context())
+
+	var req struct {
+		PaymentID string `json:"payment_id" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
+		return
+	}
+
+	objID, err := primitive.ObjectIDFromHex(req.PaymentID)
+	if err != nil {
+		response.Error(w, "Invalid payment ID", http.StatusBadRequest)
+		return
+	}
+
+	pmt, err := h.Store.FindPaymentByID(r.Context(), objID)
+	if err != nil || pmt == nil {
+		response.Error(w, "Payment not found", http.StatusNotFound)
+		return
+	}
+
+	if pmt.Paid {
+		response.Error(w, "Payment has already been completed", http.StatusBadRequest)
+		return
+	}
+
+	err = h.Store.MarkPaymentPaid(r.Context(), objID, "", payment.ModeCash)
+	if err != nil {
+		response.Error(w, "Failed to mark payment as paid", http.StatusInternalServerError)
+		return
+	}
+
+	// Debit commission from driver wallet (user-initiated cash switch)
+	driverObjID, err := primitive.ObjectIDFromHex(pmt.PartnerID)
+	if err == nil && driverObjID.Hex() != "" {
+		commission := pmt.OriginalAmount - pmt.DriverShare
+		if commission > 0 {
+			if wErr := h.WalletStore.UpdateWalletBalance(r.Context(), driverObjID, -commission); wErr != nil {
+				logger.Log.Error().Err(wErr).Str("driver_id", pmt.PartnerID).Msg("Failed to debit commission on user cash payment")
+			}
+		}
 	}
 
 	h.EventBus.PublishEvent(eventbus.ChannelPaymentCompleted, eventbus.PaymentCompletedPayload{
