@@ -113,13 +113,25 @@ func (h *ProfileHandler) HandleGetDriverProfile(w http.ResponseWriter, r *http.R
 			response.Error(w, "Database error", http.StatusInternalServerError)
 			return
 		}
-		if driver == nil {
-			response.Error(w, "User not found", http.StatusNotFound)
+		if driver != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(driver)
 			return
 		}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(driver)
+		// Driver was approved but token not refreshed — check verified drivers
+		verifiedDriver, err := h.AuthStore.FindDriverByID(r.Context(), objID)
+		if err != nil {
+			response.Error(w, "Database error", http.StatusInternalServerError)
+			return
+		}
+		if verifiedDriver != nil {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(verifiedDriver)
+			return
+		}
+
+		response.Error(w, "User not found", http.StatusNotFound)
 		return
 	}
 
