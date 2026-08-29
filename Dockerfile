@@ -53,7 +53,7 @@ LABEL org.opencontainers.image.source="https://github.com/Kaipapurandeswarreddy/
 
 # Runtime dependencies only (no gcc, no dev headers)
 RUN apk --no-cache add ca-certificates tzdata \
-    && adduser -D -u 65534 appuser
+    && adduser -D -u 10001 appuser
 
 WORKDIR /app
 
@@ -65,6 +65,6 @@ ENV PORT=8080
 EXPOSE 8080
 
 # Run as non-root
-USER appuser
+USER 10001
 
 ENTRYPOINT ["/app/ambigo-server"]
