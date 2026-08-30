@@ -1145,6 +1145,27 @@ func (s *Store) ListAllUnverifiedDriversWithOffset(ctx context.Context, limit in
 	return drivers, rows.Err()
 }
 
+func (s *Store) ListAllUnverifiedDriversForMigration(ctx context.Context) ([]UnverifiedDriver, error) {
+	rows, err := s.pool.Query(ctx, `SELECT id::text, name, mobile, portrait_image, poi_image, dl_image, rc_image, amb_front, amb_inside, vehicle_type, under_progress, error_message, fcm_token, jwt_token, location FROM unverified_drivers`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var drivers []UnverifiedDriver
+	for rows.Next() {
+		u, err := scanUnverifiedDriverRow(rows)
+		if err != nil {
+			continue
+		}
+		drivers = append(drivers, *u)
+	}
+	if drivers == nil {
+		drivers = []UnverifiedDriver{}
+	}
+	return drivers, rows.Err()
+}
+
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	return s.ListUsersPaginated(ctx, 50, "")
 }

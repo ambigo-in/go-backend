@@ -34,6 +34,16 @@ func (h *AttendantAuthHandler) HandleAttendantRequestOTP(w http.ResponseWriter, 
 		response.Error(w, "Invalid mobile number", http.StatusBadRequest)
 		return
 	}
+	// Check if attendant exists and is active in the system before generating OTP
+	att, err := h.AuthStore.FindAmbulanceAttendantByMobile(r.Context(), req.Mobile)
+	if err != nil {
+		response.Error(w, "Failed to lookup attendant", http.StatusInternalServerError)
+		return
+	}
+	if att == nil || !att.Active {
+		response.Error(w, "Mobile number not registered as an attendant. Please ask your ambulance driver to add you.", http.StatusNotFound)
+		return
+	}
 	locked, _ := h.AuthStore.IsOTPLocked(r.Context(), req.Mobile)
 	if locked {
 		response.Error(w, "Too many attempts. Try again later.", http.StatusTooManyRequests)
@@ -83,15 +93,9 @@ func (h *AttendantAuthHandler) HandleAttendantVerifyOTP(w http.ResponseWriter, r
 		response.Error(w, "Failed to lookup attendant", http.StatusInternalServerError)
 		return
 	}
-	if att == nil {
-		if req.Name == "" {
-			req.Name = "Attendant"
-		}
-		att = &auth.AmbulanceAttendant{Name: req.Name, Mobile: req.Mobile}
-		if err := h.AuthStore.CreateAmbulanceAttendant(r.Context(), att); err != nil {
-			response.Error(w, "Failed to create attendant", http.StatusInternalServerError)
-			return
-		}
+	if att == nil || !att.Active {
+		response.Error(w, "Mobile number not registered as an attendant", http.StatusForbidden)
+		return
 	}
 	// Single session like driver
 	_, _ = h.AuthStore.RevokeAllUserRefreshTokens(r.Context(), att.ID, "session_replaced")

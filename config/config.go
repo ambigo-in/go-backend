@@ -52,6 +52,7 @@ type AppConfig struct {
 	GoogleTranslateAPIURL  string
 
 	FirebaseCredentialsPath string
+	GCSBucketName           string
 	Port                    string
 	AllowStaleRefreshChain  bool
 }
@@ -114,6 +115,7 @@ func LoadConfig() *AppConfig {
 		GoogleTranslateAPIURL: envOrDefault("GOOGLE_TRANSLATE_API_URL", "https://translate.googleapis.com/translate_a/single"),
 
 		FirebaseCredentialsPath: os.Getenv("FIREBASE_CREDENTIALS_PATH"),
+		GCSBucketName:           envOrDefault("GCS_BUCKET_NAME", "ambigo-driver-docs"),
 		Port:                    port,
 		AllowStaleRefreshChain:  os.Getenv("ALLOW_STALE_REFRESH_CHAIN") == "true",
 	}
