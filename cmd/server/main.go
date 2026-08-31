@@ -159,6 +159,7 @@ func main() {
 	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg, appConfig.AllowStaleRefreshChain, referralService)
 	profileHandler := handlers.NewProfileHandler(authStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore, storageService)
+	mediaHandler := handlers.NewMediaHandler(storageService, appConfig.JWTSecret)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, walletStore, appConfig.RazorpayWebhookSecret)
 	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore, hospitalCityStore, pendingHospitalStore, counterStore, rideStore, appConfig.JWTSecret, smsCfg)
 	hospitalAuthHandler := handlers.NewHospitalAuthHandler(authStore, pendingHospitalStore, hospitalStore, appConfig.JWTSecret, smsCfg)
@@ -367,10 +368,11 @@ func main() {
 	mux.Handle("POST /api/v2/driver/profile", requireDriverOrUnvrf(profileHandler.HandleGetDriverProfile))
 	mux.Handle("POST /api/v2/driver/fcm", requireDriverOrUnvrf(profileHandler.HandleUpdateDriverFCM))
 
-	// Verification Endpoints (Protected)
+	// Verification & Media Endpoints (Protected)
 	mux.Handle("POST /api/v2/driver/verification/check", jwtAuth(http.HandlerFunc(verificationHandler.HandleCheckVerification)))
 	mux.Handle("POST /api/v2/driver/verification/update", requireUnvrfDriver(verificationHandler.HandleUpdateVerification))
 	mux.HandleFunc("/api/v2/admin/migrate-images-to-gcs", verificationHandler.HandleMigrateImagesToGCS)
+	mux.HandleFunc("GET /api/v2/media/view", mediaHandler.HandleViewMedia)
 
 	// Admin Endpoints (Protected)
 	// V7: Rate limit admin login (username/password — IP-based)

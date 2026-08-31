@@ -87,6 +87,30 @@ func (s *StorageService) UploadBase64IfImage(ctx context.Context, objectPath str
 		return "", fmt.Errorf("failed to complete GCS upload: %w", err)
 	}
 
-	url := fmt.Sprintf("https://storage.googleapis.com/%s/%s", s.bucketName, objectPath)
+	url := fmt.Sprintf("/api/v2/media/view?path=%s", objectPath)
 	return url, nil
+}
+
+// StreamObject opens a reader for an object in the private GCS bucket and returns the reader, contentType, and error.
+func (s *StorageService) StreamObject(ctx context.Context, objectPath string) (io.ReadCloser, string, error) {
+	objectPath = strings.TrimPrefix(objectPath, "/")
+	bucket := s.client.Bucket(s.bucketName)
+	obj := bucket.Object(objectPath)
+
+	attrs, err := obj.Attrs(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to fetch object attributes from GCS: %w", err)
+	}
+
+	reader, err := obj.NewReader(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to open object reader from GCS: %w", err)
+	}
+
+	contentType := attrs.ContentType
+	if contentType == "" {
+		contentType = "image/jpeg"
+	}
+
+	return reader, contentType, nil
 }
