@@ -141,16 +141,20 @@ type HospitalMD struct {
 }
 
 type HospitalReceptionist struct {
-	ID            string    `db:"id" json:"_id"`
-	HospitalID    string    `db:"hospital_id" json:"hospital_id"`
-	CreatedByMDID string    `db:"created_by_md_id" json:"created_by_md_id"`
-	Name          string    `db:"name" json:"name"`
-	Username      string    `db:"username" json:"username"`
-	PasswordHash  string    `db:"password_hash" json:"-"`
-	Mobile        *string   `db:"mobile" json:"mobile,omitempty"`
-	Active        bool      `db:"active" json:"active"`
-	CreatedAt     time.Time `db:"created_at" json:"created_at"`
-	JWTToken      *string   `db:"jwt_token" json:"jwt_token,omitempty"`
+	ID                 string    `db:"id" json:"_id"`
+	HospitalID         string    `db:"hospital_id" json:"hospital_id"`
+	CreatedByMDID      string    `db:"created_by_md_id" json:"created_by_md_id"`
+	Name               string    `db:"name" json:"name"`
+	Username           string    `db:"username" json:"username"`
+	Email              *string   `db:"email" json:"email,omitempty"`
+	PasswordHash       string    `db:"password_hash" json:"-"`
+	Mobile             *string   `db:"mobile" json:"mobile,omitempty"`
+	Active             bool      `db:"active" json:"active"`
+	Status             string    `db:"status" json:"status"`
+	MustChangePassword bool      `db:"must_change_password" json:"must_change_password"`
+	InvitedAt          time.Time `db:"invited_at" json:"invited_at"`
+	CreatedAt          time.Time `db:"created_at" json:"created_at"`
+	JWTToken           *string   `db:"jwt_token" json:"jwt_token,omitempty"`
 }
 
 type AmbulanceAttendant struct {

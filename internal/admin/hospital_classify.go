@@ -48,3 +48,8 @@ func hasGovernmentGoogleType(types []string) bool {
 	}
 	return false
 }
+
+// IsClinicName reports whether name matches clinic pattern.
+func IsClinicName(name string) bool {
+	return clinicNamePattern.MatchString(name)
+}

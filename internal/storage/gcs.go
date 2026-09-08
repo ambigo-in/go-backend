@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 
 	"cloud.google.com/go/storage"
+	"google.golang.org/api/option"
 )
 
 type StorageService struct {
@@ -21,7 +23,28 @@ func NewStorageService(ctx context.Context, bucketName string) (*StorageService,
 	if bucketName == "" {
 		bucketName = "ambigo-driver-docs"
 	}
-	client, err := storage.NewClient(ctx)
+
+	var client *storage.Client
+	var err error
+
+	// Check if explicit service account JSON is provided in env var (e.g. for Render or dev deployment)
+	credsJSON := os.Getenv("GCP_SERVICE_ACCOUNT_JSON")
+	if credsJSON == "" {
+		credsJSON = os.Getenv("GCS_SERVICE_ACCOUNT_JSON")
+	}
+	if credsJSON == "" {
+		credsJSON = os.Getenv("GOOGLE_APPLICATION_CREDENTIALS_JSON")
+	}
+
+	if credsJSON != "" {
+		client, err = storage.NewClient(ctx, option.WithCredentialsJSON([]byte(credsJSON)))
+	} else if credsFile := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"); credsFile != "" {
+		client, err = storage.NewClient(ctx, option.WithCredentialsFile(credsFile))
+	} else {
+		// Fallback to ADC / GCP Cloud Run environment credentials
+		client, err = storage.NewClient(ctx)
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize gcs client: %w", err)
 	}

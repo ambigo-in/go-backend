@@ -190,6 +190,9 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 		}
 	}
 
+	// Single-device: revoke previous sessions like driver (user strict single-device)
+	revokedCount, _ := h.AuthStore.RevokeAllUserRefreshTokens(r.Context(), user.ID, "session_replaced")
+
 	// V8: Generate access token + refresh token
 	accessToken, err := auth.GenerateAccessToken(user.ID, "user", h.JWTSecret)
 	if err != nil {
@@ -209,6 +212,11 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 	h.EventBus.PublishEvent(eventbus.ChannelAuthUserLoggedIn, eventbus.AuthUserLoggedInPayload{
 		UserID: user.ID, Mobile: payload.Mobile, RequestID: reqID,
 	})
+	if revokedCount > 0 {
+		h.EventBus.PublishEvent(eventbus.ChannelAuthSessionReplaced, eventbus.AuthSessionReplacedPayload{
+			UserID: user.ID, Role: "user", SessionID: sessionID, Mobile: payload.Mobile, RequestID: reqID,
+		})
+	}
 
 	response.Success(w, http.StatusOK, map[string]string{
 		"access_token":  accessToken,
@@ -512,6 +520,12 @@ func (h *AuthHandler) HandleLogout(w http.ResponseWriter, r *http.Request) {
 			_ = h.AuthStore.ClearDriverJWT(r.Context(), userID)
 		case "unvrf_driver":
 			_ = h.AuthStore.ClearUnverifiedDriverJWT(r.Context(), userID)
+		case "attendant":
+			_ = h.AuthStore.ClearAmbulanceAttendantJWT(r.Context(), userID)
+		case "hospital_md":
+			_ = h.AuthStore.ClearHospitalMDJWT(r.Context(), userID)
+		case "hospital_receptionist":
+			_ = h.AuthStore.ClearHospitalReceptionistJWT(r.Context(), userID)
 		}
 	}
 

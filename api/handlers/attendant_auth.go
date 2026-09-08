@@ -7,16 +7,19 @@ import (
 
 	"ambigo-backend/api/response"
 	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/logger"
 )
 
 type AttendantAuthHandler struct {
 	AuthStore *auth.Store
 	JWTSecret string
 	SMSCfg    auth.SMSCountryConfig
+	EventBus  *eventbus.InMemoryBus
 }
 
-func NewAttendantAuthHandler(authStore *auth.Store, jwtSecret string, smsCfg auth.SMSCountryConfig) *AttendantAuthHandler {
-	return &AttendantAuthHandler{AuthStore: authStore, JWTSecret: jwtSecret, SMSCfg: smsCfg}
+func NewAttendantAuthHandler(authStore *auth.Store, jwtSecret string, smsCfg auth.SMSCountryConfig, bus *eventbus.InMemoryBus) *AttendantAuthHandler {
+	return &AttendantAuthHandler{AuthStore: authStore, JWTSecret: jwtSecret, SMSCfg: smsCfg, EventBus: bus}
 }
 
 var attendantMobileRegex = regexp.MustCompile(`^[6-9]\d{9}$`)
@@ -98,7 +101,7 @@ func (h *AttendantAuthHandler) HandleAttendantVerifyOTP(w http.ResponseWriter, r
 		return
 	}
 	// Single session like driver
-	_, _ = h.AuthStore.RevokeAllUserRefreshTokens(r.Context(), att.ID, "session_replaced")
+	revokedCount, _ := h.AuthStore.RevokeAllUserRefreshTokens(r.Context(), att.ID, "session_replaced")
 	accessToken, err := auth.GenerateAccessToken(att.ID, "attendant", h.JWTSecret)
 	if err != nil {
 		response.Error(w, "Failed to generate token", http.StatusInternalServerError)
@@ -111,6 +114,12 @@ func (h *AttendantAuthHandler) HandleAttendantVerifyOTP(w http.ResponseWriter, r
 		return
 	}
 	_ = h.AuthStore.UpdateAmbulanceAttendantJWT(r.Context(), att.ID, accessToken)
+	if revokedCount > 0 && h.EventBus != nil {
+		h.EventBus.PublishEvent(eventbus.ChannelAuthSessionReplaced, eventbus.AuthSessionReplacedPayload{
+			UserID: att.ID, Role: "attendant", SessionID: sessionID,
+		})
+		logger.Log.Info().Str("attendant_id", att.ID).Msg("Attendant session replaced")
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"access_token":  accessToken,

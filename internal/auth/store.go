@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -217,8 +218,12 @@ func scanHospitalReceptionistRow(row pgx.Row) (*HospitalReceptionist, error) {
 	var r HospitalReceptionist
 	var mobile *string
 	var jwtToken *string
+	var email *string
+	var status sql.NullString
+	var mustChange sql.NullBool
+	var invitedAt sql.NullTime
 	var id, hospitalID, createdByMDID string
-	err := row.Scan(&id, &hospitalID, &createdByMDID, &r.Name, &r.Username, &r.PasswordHash, &mobile, &r.Active, &r.CreatedAt, &jwtToken)
+	err := row.Scan(&id, &hospitalID, &createdByMDID, &r.Name, &r.Username, &r.PasswordHash, &mobile, &r.Active, &r.CreatedAt, &jwtToken, &email, &status, &mustChange, &invitedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -227,6 +232,24 @@ func scanHospitalReceptionistRow(row pgx.Row) (*HospitalReceptionist, error) {
 	r.CreatedByMDID = createdByMDID
 	r.Mobile = mobile
 	r.JWTToken = jwtToken
+	r.Email = email
+	if status.Valid {
+		r.Status = status.String
+	} else if r.Active {
+		r.Status = "active"
+	} else {
+		r.Status = "invited"
+	}
+	if mustChange.Valid {
+		r.MustChangePassword = mustChange.Bool
+	} else {
+		r.MustChangePassword = r.Status == "invited"
+	}
+	if invitedAt.Valid {
+		r.InvitedAt = invitedAt.Time
+	} else {
+		r.InvitedAt = r.CreatedAt
+	}
 	return &r, nil
 }
 
@@ -1482,14 +1505,31 @@ func (s *Store) DeleteHospitalMD(ctx context.Context, id string) error {
 func (s *Store) CreateHospitalReceptionist(ctx context.Context, r *HospitalReceptionist) error {
 	r.ID = ids.New()
 	r.CreatedAt = time.Now()
+	r.InvitedAt = time.Now()
 	r.Active = true
-	_, err := s.pool.Exec(ctx, `INSERT INTO hospital_receptionists (id, hospital_id, created_by_md_id, name, username, password_hash, mobile, active, jwt_token, created_at) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10)`,
-		r.ID, r.HospitalID, r.CreatedByMDID, r.Name, r.Username, r.PasswordHash, r.Mobile, r.Active, r.JWTToken, r.CreatedAt)
+	if r.Status == "" {
+		r.Status = "invited"
+	}
+	r.MustChangePassword = true
+	_, err := s.pool.Exec(ctx, `INSERT INTO hospital_receptionists (id, hospital_id, created_by_md_id, name, username, password_hash, mobile, active, jwt_token, created_at, email, status, must_change_password, invited_at) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
+		r.ID, r.HospitalID, r.CreatedByMDID, r.Name, r.Username, r.PasswordHash, r.Mobile, r.Active, r.JWTToken, r.CreatedAt, r.Email, r.Status, r.MustChangePassword, r.InvitedAt)
 	return err
 }
 
 func (s *Store) FindHospitalReceptionistByUsername(ctx context.Context, username string) (*HospitalReceptionist, error) {
-	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token FROM hospital_receptionists WHERE username=$1`, username)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE username=$1`, username)
+	r, err := scanHospitalReceptionistRow(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return r, nil
+}
+
+func (s *Store) FindHospitalReceptionistByEmail(ctx context.Context, email string) (*HospitalReceptionist, error) {
+	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE email=$1`, email)
 	r, err := scanHospitalReceptionistRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1504,7 +1544,7 @@ func (s *Store) FindHospitalReceptionistByID(ctx context.Context, id string) (*H
 	if !ids.IsValid(id) {
 		return nil, fmt.Errorf("invalid id: %s", id)
 	}
-	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token FROM hospital_receptionists WHERE id=$1::uuid`, id)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE id=$1::uuid`, id)
 	r, err := scanHospitalReceptionistRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1519,26 +1559,18 @@ func (s *Store) ListReceptionistsByHospital(ctx context.Context, hospitalID stri
 	if !ids.IsValid(hospitalID) {
 		return nil, fmt.Errorf("invalid id: %s", hospitalID)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token FROM hospital_receptionists WHERE hospital_id=$1::uuid`, hospitalID)
+	rows, err := s.pool.Query(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE hospital_id=$1::uuid`, hospitalID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var list []HospitalReceptionist
 	for rows.Next() {
-		var r HospitalReceptionist
-		var mobile *string
-		var jwtToken *string
-		var id, hid, mdid string
-		if err := rows.Scan(&id, &hid, &mdid, &r.Name, &r.Username, &r.PasswordHash, &mobile, &r.Active, &r.CreatedAt, &jwtToken); err != nil {
+		r, err := scanHospitalReceptionistRow(rows)
+		if err != nil {
 			return nil, err
 		}
-		r.ID = id
-		r.HospitalID = hid
-		r.CreatedByMDID = mdid
-		r.Mobile = mobile
-		r.JWTToken = jwtToken
-		list = append(list, r)
+		list = append(list, *r)
 	}
 	if list == nil {
 		list = []HospitalReceptionist{}
@@ -1567,6 +1599,30 @@ func (s *Store) ClearHospitalReceptionistJWT(ctx context.Context, id string) err
 		return fmt.Errorf("invalid id: %s", id)
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE hospital_receptionists SET jwt_token=NULL WHERE id=$1::uuid`, id)
+	return err
+}
+
+func (s *Store) UpdateReceptionistPassword(ctx context.Context, id string, hash string) error {
+	if !ids.IsValid(id) {
+		return fmt.Errorf("invalid id: %s", id)
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE hospital_receptionists SET password_hash=$2, must_change_password=false, status='active', active=true WHERE id=$1::uuid`, id, hash)
+	return err
+}
+
+func (s *Store) UpdateReceptionistResendInvite(ctx context.Context, id string) error {
+	if !ids.IsValid(id) {
+		return fmt.Errorf("invalid id: %s", id)
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE hospital_receptionists SET invited_at=now(), status='invited' WHERE id=$1::uuid`, id)
+	return err
+}
+
+func (s *Store) SetReceptionistTempPassword(ctx context.Context, id string, hash string) error {
+	if !ids.IsValid(id) {
+		return fmt.Errorf("invalid id: %s", id)
+	}
+	_, err := s.pool.Exec(ctx, `UPDATE hospital_receptionists SET password_hash=$2, must_change_password=true, status='invited', active=true, invited_at=now() WHERE id=$1::uuid`, id, hash)
 	return err
 }
 

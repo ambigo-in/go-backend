@@ -55,6 +55,13 @@ type AppConfig struct {
 	GCSBucketName           string
 	Port                    string
 	AllowStaleRefreshChain  bool
+
+	// Resend (email invites)
+	ResendAPIKey      string
+	ResendFromEmail   string
+	ResendFromName    string
+	ResendToTest      string
+	ResendUseVerified bool
 }
 
 // LoadConfig reads configuration from environment variables
@@ -118,6 +125,12 @@ func LoadConfig() *AppConfig {
 		GCSBucketName:           envOrDefault("GCS_BUCKET_NAME", "ambigo-driver-docs"),
 		Port:                    port,
 		AllowStaleRefreshChain:  os.Getenv("ALLOW_STALE_REFRESH_CHAIN") == "true",
+
+		ResendAPIKey:      os.Getenv("RESEND_API_KEY"),
+		ResendFromEmail:   envOrDefault("RESEND_FROM_EMAIL", "onboarding@resend.dev"),
+		ResendFromName:    envOrDefault("RESEND_FROM_NAME", "Ambigo"),
+		ResendToTest:      envOrDefault("RESEND_TO_TEST", "delivered@resend.dev"),
+		ResendUseVerified: os.Getenv("RESEND_USE_VERIFIED") == "true",
 	}
 
 	if cfg.JWTSecret == "" {

@@ -411,6 +411,57 @@ func (h *HospitalAuthHandler) HandleHospitalMDLoginPassword(w http.ResponseWrite
 	})
 }
 
+// HandleHospitalMDStatus returns MD signup status by mobile (public, for pending stepper)
+func (h *HospitalAuthHandler) HandleHospitalMDStatus(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Mobile string `json:"mobile"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !hospitalMDSignupMobileRegex.MatchString(req.Mobile) {
+		response.Error(w, "Invalid mobile number", http.StatusBadRequest)
+		return
+	}
+	md, err := h.AuthStore.FindHospitalMDByMobile(r.Context(), req.Mobile)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+	if md == nil {
+		response.Error(w, "MD not found", http.StatusNotFound)
+		return
+	}
+	// Also fetch pending for rejection reason if any
+	var pendingStatus *string
+	var rejectionReason *string
+	if md.HospitalPendingID != nil {
+		if pending, _ := h.PendingStore.FindByID(r.Context(), *md.HospitalPendingID); pending != nil {
+			pendingStatus = &pending.Status
+			if pending.RejectionReason != nil {
+				rejectionReason = pending.RejectionReason
+			}
+		}
+	}
+	// Fallback: check pending by md_number if no pending_id link
+	if pendingStatus == nil {
+		if pending, _ := h.PendingStore.FindByMDNumber(r.Context(), req.Mobile); pending != nil {
+			pendingStatus = &pending.Status
+			rejectionReason = pending.RejectionReason
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":           md.Status,
+		"pending_status":   pendingStatus,
+		"rejection_reason": rejectionReason,
+		"hospital_id":      md.HospitalID,
+		"name":             md.Name,
+		"mobile":           md.Mobile,
+	})
+}
+
 // HandleHospitalMDMe returns current MD profile
 func (h *HospitalAuthHandler) HandleHospitalMDMe(w http.ResponseWriter, r *http.Request) {
 	mdIDStr, ok := r.Context().Value(middleware.UserIDKey).(string)

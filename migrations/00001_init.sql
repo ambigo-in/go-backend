@@ -204,7 +204,7 @@ CREATE TABLE hospital_mds (
     official_number     TEXT NOT NULL DEFAULT '',
     username            TEXT UNIQUE,
     password_hash       TEXT,
-    status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','rejected')),
+    status              TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','active','rejected','banned')),
     jwt_token           TEXT,
     fcm_token           TEXT,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),

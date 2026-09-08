@@ -208,13 +208,13 @@ func haversineKm(lat1, lng1, lat2, lng2 float64) float64 {
 }
 
 // HandleSyncHospitals forces a Google re-seed of all configured cities (admin
-// triggered). Returns the number of hospital documents changed.
+// triggered). Bypasses MaxCacheAge to allow immediate re-seed after radius/cap changes.
 func (h *SharedHandler) HandleSyncHospitals(w http.ResponseWriter, r *http.Request) {
 	if h.Seeder == nil {
 		response.Error(w, "Hospital seeding not configured", http.StatusServiceUnavailable)
 		return
 	}
-	n, err := h.Seeder.SeedAll(r.Context())
+	n, err := h.Seeder.SeedAllForce(r.Context())
 	if err != nil {
 		response.Error(w, "Hospital sync failed", http.StatusBadGateway)
 		return

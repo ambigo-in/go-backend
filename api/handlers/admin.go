@@ -13,6 +13,7 @@ import (
 	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/ids"
 	"ambigo-backend/internal/logger"
+	"ambigo-backend/internal/mailer"
 	"ambigo-backend/internal/requestid"
 	"ambigo-backend/internal/ride"
 	"ambigo-backend/internal/translation"
@@ -30,9 +31,10 @@ type AdminHandler struct {
 	RideStore            *ride.Store
 	JWTSecret            string
 	SMSCfg               auth.SMSCountryConfig
+	Mailer               *mailer.ResendMailer
 }
 
-func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore, hcStore *admin.HospitalCityStore, pStore *admin.PendingHospitalStore, cStore *admin.CounterStore, rStore *ride.Store, jwtSecret string, smsCfg auth.SMSCountryConfig) *AdminHandler {
+func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore, hcStore *admin.HospitalCityStore, pStore *admin.PendingHospitalStore, cStore *admin.CounterStore, rStore *ride.Store, jwtSecret string, smsCfg auth.SMSCountryConfig, mailer *mailer.ResendMailer) *AdminHandler {
 	return &AdminHandler{
 		Store:                store,
 		AuthStore:            authStore,
@@ -44,6 +46,7 @@ func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventb
 		RideStore:            rStore,
 		JWTSecret:            jwtSecret,
 		SMSCfg:               smsCfg,
+		Mailer:               mailer,
 	}
 }
 
@@ -1263,12 +1266,13 @@ func (h *AdminHandler) HandleDeleteHospital(w http.ResponseWriter, r *http.Reque
 // -------------------------
 
 type HospitalCityRequest struct {
-	ID       string  `json:"_id"`
-	Name     string  `json:"name" validate:"required"`
-	Lat      float64 `json:"lat" validate:"required,min=-90,max=90"`
-	Lng      float64 `json:"lng" validate:"required,min=-180,max=180"`
-	RadiusKM float64 `json:"radius_km" validate:"required,min=1"`
-	Enabled  bool    `json:"enabled"`
+	ID              string   `json:"_id"`
+	Name            string   `json:"name" validate:"required"`
+	Lat             float64  `json:"lat" validate:"required,min=-90,max=90"`
+	Lng             float64  `json:"lng" validate:"required,min=-180,max=180"`
+	RadiusKM        float64  `json:"radius_km" validate:"required,min=1,max=60"`
+	MaxPerCategory  *int     `json:"max_per_category" validate:"omitempty,min=5,max=60"`
+	Enabled         bool     `json:"enabled"`
 }
 
 func (h *AdminHandler) HandleListHospitalCities(w http.ResponseWriter, r *http.Request) {
@@ -1291,12 +1295,23 @@ func (h *AdminHandler) HandleAddHospitalCity(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	maxPerCategory := 40
+	if req.MaxPerCategory != nil {
+		maxPerCategory = *req.MaxPerCategory
+	}
+	if maxPerCategory < 5 {
+		maxPerCategory = 5
+	}
+	if maxPerCategory > 60 {
+		maxPerCategory = 60
+	}
 	city := &admin.HospitalCity{
-		Name:     req.Name,
-		Lat:      req.Lat,
-		Lng:      req.Lng,
-		RadiusM:  int64(req.RadiusKM * 1000),
-		Enabled:  req.Enabled,
+		Name:           req.Name,
+		Lat:            req.Lat,
+		Lng:            req.Lng,
+		RadiusM:        int64(req.RadiusKM * 1000),
+		MaxPerCategory: maxPerCategory,
+		Enabled:        req.Enabled,
 	}
 	if err := h.HospitalCityStore.Create(r.Context(), city); err != nil {
 		response.Error(w, "City add failed", http.StatusBadRequest)
@@ -1324,13 +1339,24 @@ func (h *AdminHandler) HandleUpdateHospitalCity(w http.ResponseWriter, r *http.R
 		return
 	}
 
+	maxPerCategoryUpd := 40
+	if req.MaxPerCategory != nil {
+		maxPerCategoryUpd = *req.MaxPerCategory
+	}
+	if maxPerCategoryUpd < 5 {
+		maxPerCategoryUpd = 5
+	}
+	if maxPerCategoryUpd > 60 {
+		maxPerCategoryUpd = 60
+	}
 	city := &admin.HospitalCity{
-		ID:      req.ID,
-		Name:    req.Name,
-		Lat:     req.Lat,
-		Lng:     req.Lng,
-		RadiusM: int64(req.RadiusKM * 1000),
-		Enabled: req.Enabled,
+		ID:             req.ID,
+		Name:           req.Name,
+		Lat:            req.Lat,
+		Lng:            req.Lng,
+		RadiusM:        int64(req.RadiusKM * 1000),
+		MaxPerCategory: maxPerCategoryUpd,
+		Enabled:        req.Enabled,
 	}
 	if err := h.HospitalCityStore.Update(r.Context(), city); err != nil {
 		response.Error(w, "City update failed", http.StatusBadRequest)
@@ -1465,6 +1491,13 @@ func (h *AdminHandler) HandleApprovePendingHospital(w http.ResponseWriter, r *ht
 		}
 	}
 
+	// Send approval email (no link, just where to login)
+	if h.Mailer != nil && pending.Email != "" {
+		_ = h.Mailer.SendHospitalApproveEmail(pending.Email, pending.Name, pending.City)
+	} else {
+		logger.Log.Warn().Str("pending_id", pending.ID).Msg("Approve email skipped: no email or mailer")
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Hospital approved", "hospital_id": hospital.ID})
 }
@@ -1490,10 +1523,15 @@ func (h *AdminHandler) HandleRejectPendingHospital(w http.ResponseWriter, r *htt
 		response.Error(w, "Pending hospital not found", http.StatusNotFound)
 		return
 	}
-	// Delete entirely so MD can re-signup fresh
-	if err := h.PendingHospitalStore.Delete(r.Context(), req.ID); err != nil {
+	// Hybrid C: keep pending row as rejected for audit, delete MD to free mobile
+	reviewerID, _ := r.Context().Value(middleware.UserIDKey).(string)
+	if err := h.PendingHospitalStore.Reject(r.Context(), req.ID, reviewerID, req.ErrorMessage); err != nil {
 		response.Error(w, "Reject failed", http.StatusInternalServerError)
 		return
+	}
+	// Send rejection email (no link, just where to login and reason)
+	if h.Mailer != nil && pending.Email != "" {
+		_ = h.Mailer.SendHospitalRejectEmail(pending.Email, pending.Name, req.ErrorMessage)
 	}
 	if pending.MDID != "" && ids.IsValid(pending.MDID) {
 		_ = h.AuthStore.DeleteHospitalMD(r.Context(), pending.MDID)
@@ -1501,7 +1539,7 @@ func (h *AdminHandler) HandleRejectPendingHospital(w http.ResponseWriter, r *htt
 		_ = h.AuthStore.ClearHospitalMDJWT(r.Context(), pending.MDID)
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"detail": "Hospital rejected and removed"})
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Hospital rejected"})
 }
 
 func (h *AdminHandler) HandlePendingHospitalCounter(w http.ResponseWriter, r *http.Request) {

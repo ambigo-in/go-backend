@@ -110,7 +110,7 @@ func (m *Manager) Run() {
 			// Session gate: reject stale-session connections for single-session
 			// roles before they can be registered. Only applies when the client
 			// actually sent a session_id (legacy clients are not gated).
-			if (client.Role == "driver" || client.Role == "unvrf_driver") && client.SessionID != "" {
+			if (client.Role == "driver" || client.Role == "unvrf_driver" || client.Role == "user" || client.Role == "attendant") && client.SessionID != "" {
 				if cur, ok := m.currentSessions[client.Role+":"+client.ID]; ok && cur != "" && cur != client.SessionID {
 					m.mu.Unlock()
 					m.rejectClient(client)
