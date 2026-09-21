@@ -1,18 +1,22 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
 	"sort"
 	"strconv"
+	"sync"
+	"time"
 
 	"ambigo-backend/api/middleware"
 	"ambigo-backend/api/response"
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/hospital"
 	"ambigo-backend/internal/location"
+	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/telephony"
 )
 
@@ -22,6 +26,18 @@ type SharedHandler struct {
 	AdminStore    *admin.Store
 	HospitalStore *admin.HospitalStore
 	Seeder        *hospital.Seeder
+	WithdrawalFee float64
+	OfferTTL      int
+
+	// citySync guards the background per-area seed: one run at a time so a
+	// retry tap can't double-seed. A disconnect can never cancel the job
+	// because it runs on a detached context.
+	citySyncMu      sync.Mutex
+	citySyncRunning bool
+	citySyncCityID  string
+	citySyncChanged int
+	citySyncErr     string
+	citySyncUpdated time.Time
 }
 
 func NewSharedHandler(cs *telephony.CloudshopeService, cStore *admin.CounterStore, aStore *admin.Store, hStore *admin.HospitalStore, seeder *hospital.Seeder) *SharedHandler {
@@ -31,7 +47,28 @@ func NewSharedHandler(cs *telephony.CloudshopeService, cStore *admin.CounterStor
 		AdminStore:    aStore,
 		HospitalStore: hStore,
 		Seeder:        seeder,
+		WithdrawalFee: 7,
+		OfferTTL:      30,
 	}
+}
+
+// SetAppConfig wires dynamic values (WITHDRAWAL_FEE env, offer timeout).
+func (h *SharedHandler) SetAppConfig(withdrawalFee float64, offerTTL int) {
+	if withdrawalFee >= 0 {
+		h.WithdrawalFee = withdrawalFee
+	}
+	if offerTTL > 0 {
+		h.OfferTTL = offerTTL
+	}
+}
+
+// HandleGetAppConfig exposes dynamic config so apps never hardcode fees/TTLs.
+func (h *SharedHandler) HandleGetAppConfig(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"withdrawal_fee":   h.WithdrawalFee,
+		"offer_expires_in": h.OfferTTL,
+	})
 }
 
 func (h *SharedHandler) HandleCallMask(w http.ResponseWriter, r *http.Request) {
@@ -207,8 +244,89 @@ func haversineKm(lat1, lng1, lat2, lng2 float64) float64 {
 	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 }
 
-// HandleSyncHospitals forces a Google re-seed of all configured cities (admin
-// triggered). Bypasses MaxCacheAge to allow immediate re-seed after radius/cap changes.
+// HandleSyncHospitalCity starts a per-area seed in the background and returns
+// 202 immediately. Seeding takes 15-60s (Google pagination + per-row writes),
+// far beyond the app's 15s HTTP timeout, so waiting inline always surfaces a
+// false "connection timed out" while the work completes. Poll
+// HandleSyncHospitalCityStatus for completion.
+func (h *SharedHandler) HandleSyncHospitalCity(w http.ResponseWriter, r *http.Request) {
+	if h.Seeder == nil || h.Seeder.Cities == nil {
+		response.Error(w, "Hospital seeding not configured", http.StatusServiceUnavailable)
+		return
+	}
+	var req struct {
+		ID string `json:"id" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	city, err := h.Seeder.Cities.GetByID(r.Context(), req.ID)
+	if err != nil {
+		response.Error(w, "Failed to fetch city", http.StatusInternalServerError)
+		return
+	}
+	if city == nil {
+		response.Error(w, "Service area not found", http.StatusNotFound)
+		return
+	}
+	if !city.Enabled {
+		response.Error(w, "Service area disabled", http.StatusBadRequest)
+		return
+	}
+
+	h.citySyncMu.Lock()
+	if h.citySyncRunning {
+		runningID := h.citySyncCityID
+		h.citySyncMu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]interface{}{"detail": "Sync already running", "city_id": runningID})
+		return
+	}
+	h.citySyncRunning = true
+	h.citySyncCityID = city.ID
+	h.citySyncErr = ""
+	h.citySyncMu.Unlock()
+
+	go func(c admin.HospitalCity) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		n, err := h.Seeder.SeedCity(ctx, c)
+		h.citySyncMu.Lock()
+		defer h.citySyncMu.Unlock()
+		h.citySyncRunning = false
+		h.citySyncUpdated = time.Now()
+		if err != nil {
+			h.citySyncErr = err.Error()
+			logger.Log.Error().Err(err).Str("city_id", c.ID).Msg("Background city sync failed")
+			return
+		}
+		h.citySyncChanged = n
+		logger.Log.Info().Str("city_id", c.ID).Int("changed", n).Msg("Background city sync completed")
+	}(*city)
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]interface{}{"detail": "Sync started", "city_id": city.ID})
+}
+
+// HandleSyncHospitalCityStatus reports the background per-area seed state
+// for the app's polling loop.
+func (h *SharedHandler) HandleSyncHospitalCityStatus(w http.ResponseWriter, r *http.Request) {
+	h.citySyncMu.Lock()
+	defer h.citySyncMu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"running":    h.citySyncRunning,
+		"city_id":    h.citySyncCityID,
+		"changed":    h.citySyncChanged,
+		"error":      h.citySyncErr,
+		"updated_at": h.citySyncUpdated,
+	})
+}
+
+// HandleSyncHospitals kept for backwards compat but not routed (per-area is primary).
 func (h *SharedHandler) HandleSyncHospitals(w http.ResponseWriter, r *http.Request) {
 	if h.Seeder == nil {
 		response.Error(w, "Hospital seeding not configured", http.StatusServiceUnavailable)

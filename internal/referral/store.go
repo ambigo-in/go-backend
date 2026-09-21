@@ -50,6 +50,10 @@ func (s *Store) WithTx(tx pgx.Tx) *Store {
 	return &Store{pool: s.pool, db: tx}
 }
 
+// Pool returns the underlying pool for cross-store transactions
+// (wallet credit + credit-flag flip must commit atomically).
+func (s *Store) Pool() *pgxpool.Pool { return s.pool }
+
 // WithTx runs fn inside a transaction. Mirrors payment.WithTx / ride.WithTx pattern.
 func WithTx(ctx context.Context, pool *pgxpool.Pool, fn func(pgx.Tx) error) error {
 	tx, err := pool.Begin(ctx)
@@ -183,11 +187,15 @@ func (s *Store) CreateRecord(ctx context.Context, rec *Record) error {
 	return err
 }
 
-// FindPendingByReferee returns referral records for a referee where rides_done < rides_required
-// and the referrer hasn't been credited yet.
-// Postgres: SELECT * FROM referral_records WHERE referee_id=$1 AND referee_role=$2 AND referrer_credited=false AND rides_done < rides_required
+// FindPendingByReferee returns referral records for a referee that still need
+// attention: any row whose referrer credit has not landed. Threshold rows
+// (rides_done < rides_required) are still counting; at/over-threshold rows
+// with referrer_credited=false are retries of a failed credit Tx. The retry
+// lane is bounded above by the service (it only increments while below
+// threshold and credits via atomic claim), so overshoot rows are retried,
+// never re-counted, and never double-credited.
 func (s *Store) FindPendingByReferee(ctx context.Context, refereeID, refereeRole string) ([]Record, error) {
-	rows, err := s.db.Query(ctx, recordSelect+` WHERE referee_id=$1 AND referee_role=$2 AND referrer_credited=false AND rides_done < rides_required`, refereeID, refereeRole)
+	rows, err := s.db.Query(ctx, recordSelect+` WHERE referee_id=$1 AND referee_role=$2 AND referrer_credited=false ORDER BY created_at ASC LIMIT 20`, refereeID, refereeRole)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +249,27 @@ func (s *Store) IncrementRidesDone(ctx context.Context, recordID string) (*Recor
 func (s *Store) MarkReferrerCredited(ctx context.Context, recordID string) error {
 	_, err := s.db.Exec(ctx, `UPDATE referral_records SET referrer_credited=true, completed_at=now() WHERE id=$1::uuid`, recordID)
 	return err
+}
+
+// ClaimReferrerCredit flips referrer_credited=false→true atomically and
+// reports whether this caller won the claim. Concurrent threshold completions
+// race here; exactly one wins, the loser skips the wallet credit (no double
+// bonus). Must run inside the same Tx as the wallet credit.
+func (s *Store) ClaimReferrerCredit(ctx context.Context, recordID string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE referral_records SET referrer_credited=true, completed_at=now() WHERE id=$1::uuid AND referrer_credited=false`, recordID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ClaimRefereeCredit is the referee-side equivalent (welcome bonus).
+func (s *Store) ClaimRefereeCredit(ctx context.Context, recordID string) (bool, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE referral_records SET referee_credited=true WHERE id=$1::uuid AND referee_credited=false`, recordID)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() > 0, nil
 }
 
 // MarkRefereeCredited marks the referee as credited for a referral record.

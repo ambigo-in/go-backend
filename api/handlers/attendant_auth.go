@@ -40,11 +40,11 @@ func (h *AttendantAuthHandler) HandleAttendantRequestOTP(w http.ResponseWriter, 
 	// Check if attendant exists and is active in the system before generating OTP
 	att, err := h.AuthStore.FindAmbulanceAttendantByMobile(r.Context(), req.Mobile)
 	if err != nil {
-		response.Error(w, "Failed to lookup attendant", http.StatusInternalServerError)
+		response.Error(w, "Failed to lookup paramedic", http.StatusInternalServerError)
 		return
 	}
 	if att == nil || !att.Active {
-		response.Error(w, "Mobile number not registered as an attendant. Please ask your ambulance driver to add you.", http.StatusNotFound)
+		response.Error(w, "Mobile number not registered as a paramedic. Please ask your ambulance driver to add you.", http.StatusNotFound)
 		return
 	}
 	locked, _ := h.AuthStore.IsOTPLocked(r.Context(), req.Mobile)
@@ -69,6 +69,7 @@ func (h *AttendantAuthHandler) HandleAttendantVerifyOTP(w http.ResponseWriter, r
 		DeviceID   string `json:"device_id"`
 		DeviceName string `json:"device_name"`
 		Name       string `json:"name"`
+		FCMToken   string `json:"fcm_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -93,11 +94,11 @@ func (h *AttendantAuthHandler) HandleAttendantVerifyOTP(w http.ResponseWriter, r
 
 	att, err := h.AuthStore.FindAmbulanceAttendantByMobile(r.Context(), req.Mobile)
 	if err != nil {
-		response.Error(w, "Failed to lookup attendant", http.StatusInternalServerError)
+		response.Error(w, "Failed to lookup paramedic", http.StatusInternalServerError)
 		return
 	}
 	if att == nil || !att.Active {
-		response.Error(w, "Mobile number not registered as an attendant", http.StatusForbidden)
+		response.Error(w, "Mobile number not registered as a paramedic", http.StatusForbidden)
 		return
 	}
 	// Single session like driver
@@ -113,6 +114,8 @@ func (h *AttendantAuthHandler) HandleAttendantVerifyOTP(w http.ResponseWriter, r
 		response.Error(w, "Failed to create session", http.StatusInternalServerError)
 		return
 	}
+	// Session-scoped push token for the single-session kill-switch.
+	_ = h.AuthStore.SetSessionFCMToken(r.Context(), att.ID, sessionID, req.FCMToken)
 	_ = h.AuthStore.UpdateAmbulanceAttendantJWT(r.Context(), att.ID, accessToken)
 	if revokedCount > 0 && h.EventBus != nil {
 		h.EventBus.PublishEvent(eventbus.ChannelAuthSessionReplaced, eventbus.AuthSessionReplacedPayload{

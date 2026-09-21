@@ -1,5 +1,7 @@
 package eventbus
 
+import "strings"
+
 // Channel constants for EventBus pub/sub
 const (
 	ChannelRideRequested        = "ride:requested"
@@ -29,6 +31,8 @@ const (
 	ChannelAdminOfferDeleted    = "admin:offer_deleted"
 	ChannelAdminDriverRejected = "admin:driver_rejected"
 	ChannelReferralCredited    = "referral:credited"
+	ChannelSafetyStoppedWarn  = "safety:stopped_warning"
+	ChannelSafetyStoppedAlarm = "safety:stopped_emergency"
 )
 
 // RideRequestedPayload is published when a user requests a ride
@@ -53,23 +57,27 @@ type RideRequestedPayload struct {
 
 // RideDriverOfferedPayload is published when a ride is offered to a specific driver
 type RideDriverOfferedPayload struct {
-	RideID           string  `json:"ride_id"`
-	DriverID         string  `json:"driver_id"`
-	UserID           string  `json:"user_id"`
-	PickupLat        float64 `json:"pickup_lat"`
-	PickupLng        float64 `json:"pickup_lng"`
-	PickupAddress    string  `json:"pickup_address"`
-	DropoffLat       float64 `json:"dropoff_lat"`
-	DropoffLng       float64 `json:"dropoff_lng"`
-	DropAddress      string  `json:"drop_address"`
-	ETASeconds       int     `json:"eta_seconds"`
-	PickupDistanceKm float64 `json:"pickup_distance_km"`
-	TripDistanceKm   float64 `json:"trip_distance_km"`
-	Fare             float64 `json:"fare"`
-	DriverShare      float64 `json:"driver_share"`
-	PaymentMode      string  `json:"payment_mode"`
-	IsSOS            bool    `json:"is_sos"`
-	RequestID        string  `json:"request_id,omitempty"`
+	RideID              string  `json:"ride_id"`
+	DriverID            string  `json:"driver_id"`
+	UserID              string  `json:"user_id"`
+	PickupLat           float64 `json:"pickup_lat"`
+	PickupLng           float64 `json:"pickup_lng"`
+	PickupAddress       string  `json:"pickup_address"`
+	DropoffLat          float64 `json:"dropoff_lat"`
+	DropoffLng          float64 `json:"dropoff_lng"`
+	DropAddress         string  `json:"drop_address"`
+	ETASeconds          int     `json:"eta_seconds"`
+	PickupDistanceKm    float64 `json:"pickup_distance_km"`
+	TripDistanceKm      float64 `json:"trip_distance_km"`
+	TripDurationSeconds int     `json:"trip_duration_seconds,omitempty"`
+	Fare                float64 `json:"fare"`
+	DriverShare         float64 `json:"driver_share"`
+	PaymentMode         string  `json:"payment_mode"`
+	IsSOS               bool    `json:"is_sos"`
+	AmbTypeID           string  `json:"amb_type_id,omitempty"`
+	OfferedAt           string  `json:"offered_at,omitempty"`
+	OfferExpiresIn      int     `json:"offer_expires_in,omitempty"`
+	RequestID           string  `json:"request_id,omitempty"`
 }
 
 // RideAcceptedPayload is published when a driver accepts a ride
@@ -238,4 +246,56 @@ type ReferralCreditedPayload struct {
 	Amount        float64 `json:"amount"`
 	Reason        string  `json:"reason"` // "signup_referral", "ride_threshold_met", "welcome_bonus"
 	RequestID     string  `json:"request_id,omitempty"`
+}
+
+// SafetyStoppedWarningPayload is published when an IN_PROGRESS ride
+// (excluding auto/bike/cab, SOS included) stays within the move threshold
+// for 3 minutes. Stage 1: nudge the driver only.
+type SafetyStoppedWarningPayload struct {
+	RideID         string  `json:"ride_id"`
+	DriverID       string  `json:"driver_id"`
+	UserID         string  `json:"user_id,omitempty"`
+	Lat            float64 `json:"lat"`
+	Lng            float64 `json:"lng"`
+	StoppedMinutes int     `json:"stopped_minutes"`
+	AmbType        string  `json:"amb_type,omitempty"`
+	AmbTypeName    string  `json:"amb_type_name,omitempty"`
+	DriverName     string  `json:"driver_name,omitempty"`
+	DriverMobile   string  `json:"driver_mobile,omitempty"`
+	RideRef        string  `json:"ride_ref,omitempty"`
+	RequestID      string  `json:"request_id,omitempty"`
+}
+
+// SafetyStoppedEmergencyPayload is published when the same stop reaches
+// 5 minutes total. Stage 2: emergency flag is escalated (no-op if already
+// SOS) and admins are notified with actionable contact details.
+type SafetyStoppedEmergencyPayload struct {
+	RideID         string  `json:"ride_id"`
+	DriverID       string  `json:"driver_id"`
+	UserID         string  `json:"user_id,omitempty"`
+	Lat            float64 `json:"lat"`
+	Lng            float64 `json:"lng"`
+	StoppedMinutes int     `json:"stopped_minutes"`
+	AmbType        string  `json:"amb_type,omitempty"`
+	AmbTypeName    string  `json:"amb_type_name,omitempty"`
+	DriverName     string  `json:"driver_name,omitempty"`
+	DriverMobile   string  `json:"driver_mobile,omitempty"`
+	RideRef        string  `json:"ride_ref,omitempty"`
+	RequestID      string  `json:"request_id,omitempty"`
+}
+
+// ShortRideRef returns the last 6 alphanumeric chars of a ride UUID,
+// uppercase, for human reference ("quote trip 3F2A29 on a call").
+func ShortRideRef(rideID string) string {
+	var b strings.Builder
+	for _, r := range rideID {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	s := strings.ToUpper(b.String())
+	if len(s) <= 6 {
+		return s
+	}
+	return s[len(s)-6:]
 }

@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -209,7 +210,7 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			emergency := h.PricingEngine.CalculateEmergencySurcharge(base, newRide.EmergencyPriority > 0)
 			night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
 			totalAmount := base + emergency + night
-			totalAmount = float64(int(totalAmount*100)) / 100
+			totalAmount = payment.RoundRupees(totalAmount)
 
 			// Calculate Driver Share (DriverShare is a percentage of BaseFare)
 			driverBaseFare := ambType.BaseFare * ambType.DriverShare / 100.0
@@ -217,7 +218,7 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			dEmergency := h.PricingEngine.CalculateEmergencySurcharge(dBase, newRide.EmergencyPriority > 0)
 			dNight := h.PricingEngine.CalculateNightSurcharge(dBase, time.Now())
 			driverShareTotal := dBase + dEmergency + dNight
-			driverShareTotal = float64(int(driverShareTotal*100)) / 100
+			driverShareTotal = payment.RoundRupees(driverShareTotal)
 
 			log.Debug().Float64("total", totalAmount).Float64("driver_share", driverShareTotal).Msg("Fare computed")
 
@@ -443,16 +444,20 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			emergency := h.PricingEngine.CalculateEmergencySurcharge(base, rideData.EmergencyPriority > 0)
 			night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
 			finalAmount = base + emergency + night
-			finalAmount = float64(int(finalAmount*100)) / 100
+			finalAmount = payment.RoundRupees(finalAmount)
 		}
 	}
 
 	if finalAmount <= 0 {
-		finalAmount = 50.0
+		logger.Log.Error().Str("ride_id", rideID).Str("request_id", reqID).Msg("Ride completed with non-positive fare and no fallback available")
+		response.Error(w, "Cannot complete ride: fare could not be determined", http.StatusUnprocessableEntity)
+		return
 	}
 
-	// Apply referral credit discount — kept outside Tx (outbox pattern per 03 §6)
-	// The discount is consumed from offers (separate table) and must not hold ride row lock during external logic.
+	// Apply referral credit discount. The claim is atomic (single-statement
+	// DELETE...RETURNING): concurrent completions cannot spend the same
+	// credit twice. Claimed value is restored on every failure below, so the
+	// user never loses credit for a ride that did not complete.
 	referralDiscount := 0.0
 	if h.ReferralService != nil {
 		discount, err := h.ReferralService.ConsumeUserReferralCredit(r.Context(), rideData.UserID)
@@ -460,6 +465,11 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			referralDiscount = discount
 		} else {
 			logger.Log.Error().Err(err).Str("user_id", rideData.UserID).Str("request_id", reqID).Msg("Failed to consume referral credit")
+		}
+	}
+	restoreDiscount := func() {
+		if h.ReferralService != nil && referralDiscount > 0 {
+			h.ReferralService.RestoreUserReferralCredit(r.Context(), rideData.UserID, referralDiscount)
 		}
 	}
 
@@ -485,9 +495,43 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		CreatedAt:      time.Now(),
 	}
 
+	// Idempotency: a retried complete (client timeout after commit) must not
+	// mint a second bill. If a bill already exists, the discount (if any) was
+	// consumed for nothing — restore it before answering the conflict.
+	if existing, err := h.PaymentStore.FindPaymentByRideID(r.Context(), rideID); err != nil {
+		logger.Log.Error().Err(err).Str("ride_id", rideID).Str("request_id", reqID).Msg("Duplicate-payment check failed")
+		restoreDiscount()
+		response.Error(w, "Failed to complete ride: "+err.Error(), http.StatusInternalServerError)
+		return
+	} else if existing != nil {
+		restoreDiscount()
+		response.Error(w, "Ride already has a payment", http.StatusConflict)
+		return
+	}
+
+	// Validate payment mode early: anything else hits the DB CHECK as a 500.
+	if req.PaymentMode != "cash" && req.PaymentMode != "online" {
+		restoreDiscount()
+		response.Error(w, "Invalid payment mode (must be cash or online)", http.StatusBadRequest)
+		return
+	}
+
 	if req.PaymentMode == "online" {
-		orderID, err := h.RazorpayService.CreateOrder(userAmount, rideID)
-		if err == nil {
+		if userAmount <= 0 {
+			// Fully discounted: nothing to collect. Settle immediately as
+			// paid so the bill never sticks unpaid; the platform absorbs
+			// the driver share (same rule as referral discounts).
+			pmt.Paid = true
+			now := time.Now()
+			pmt.PaidAt = &now
+		} else {
+			orderID, err := h.RazorpayService.CreateOrder(userAmount, rideID)
+			if err != nil {
+				logger.Log.Error().Err(err).Str("ride_id", rideID).Str("request_id", reqID).Msg("Razorpay order creation failed; ride not completed")
+				restoreDiscount()
+				response.Error(w, "Failed to create online payment order, please retry", http.StatusBadGateway)
+				return
+			}
 			pmt.RazorpayOrderID = &orderID
 		}
 	} else {
@@ -524,15 +568,65 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		if req.PaymentMode != "online" {
 			commission := pmt.OriginalAmount - pmt.DriverShare
-			if commission > 0 && ids.IsValid(driverID) {
+			if commission > 0 {
+				if !ids.IsValid(driverID) {
+					return errors.New("invalid driver for commission debit")
+				}
+				var exists bool
+				if qerr := tx.QueryRow(r.Context(), `SELECT EXISTS(SELECT 1 FROM drivers WHERE id=$1)`, driverID).Scan(&exists); qerr != nil {
+					return qerr
+				}
+				if !exists {
+					return errors.New("driver not found for commission debit")
+				}
 				if err := wTx.UpdateWalletBalance(r.Context(), driverID, -commission); err != nil {
 					return err
 				}
+				bal, berr := wTx.GetBalance(r.Context(), driverID)
+				if berr != nil {
+					return berr
+				}
+				if err := wTx.InsertLedgerEntry(r.Context(), &payment.WalletTransaction{
+					DriverID:    driverID,
+					Amount:      commission,
+					Direction:   "debit",
+					TxnType:     "commission_debit",
+					ReferenceID: pmt.ID,
+					Status:      "success",
+					BalanceAfter: &bal,
+				}); err != nil {
+					return err
+				}
+			}
+		} else if pmt.Paid && pmt.DriverShare > 0 {
+			// Fully-discounted online ride settled above: credit the driver
+			// share now (platform absorbs), with a ledger row.
+			if !ids.IsValid(driverID) {
+				return errors.New("invalid driver for zero-amount credit")
+			}
+			if err := wTx.UpdateWalletBalance(r.Context(), driverID, pmt.DriverShare); err != nil {
+				return err
+			}
+			bal, berr := wTx.GetBalance(r.Context(), driverID)
+			if berr != nil {
+				return berr
+			}
+			if err := wTx.InsertLedgerEntry(r.Context(), &payment.WalletTransaction{
+				DriverID:    driverID,
+				Amount:      pmt.DriverShare,
+				Direction:   "credit",
+				TxnType:     "ride_credit",
+				ReferenceID: pmt.ID,
+				Status:      "success",
+				BalanceAfter: &bal,
+			}); err != nil {
+				return err
 			}
 		}
 		return nil
 	}); err != nil {
 		logger.Log.Error().Err(err).Str("ride_id", rideID).Str("request_id", reqID).Msg("Failed to complete ride transaction")
+		restoreDiscount()
 		response.Error(w, "Failed to complete ride: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -871,13 +965,13 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		base := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, ambType.BaseFare, pricingTiers)
 		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS)
 		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
-		total := float64(int((base+emergency+night)*100)) / 100
+		total := payment.RoundRupees(base+emergency+night)
 
 		driverBaseFare := ambType.BaseFare * ambType.DriverShare / 100.0
 		dBase := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, driverBaseFare, pricingTiers)
 		dEmergency := h.PricingEngine.CalculateEmergencySurcharge(dBase, req.IsSOS)
 		dNight := h.PricingEngine.CalculateNightSurcharge(dBase, time.Now())
-		driverShare := float64(int((dBase+dEmergency+dNight)*100)) / 100
+		driverShare := payment.RoundRupees(dBase+dEmergency+dNight)
 
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(map[string]interface{}{
@@ -921,13 +1015,13 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		base := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, ambType.BaseFare, pricingTiers)
 		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS)
 		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
-		total := float64(int((base+emergency+night)*100)) / 100
+		total := payment.RoundRupees(base+emergency+night)
 
 		driverBaseFare := ambType.BaseFare * ambType.DriverShare / 100.0
 		dBase := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, driverBaseFare, pricingTiers)
 		dEmergency := h.PricingEngine.CalculateEmergencySurcharge(dBase, req.IsSOS)
 		dNight := h.PricingEngine.CalculateNightSurcharge(dBase, time.Now())
-		driverShare := float64(int((dBase+dEmergency+dNight)*100)) / 100
+		driverShare := payment.RoundRupees(dBase+dEmergency+dNight)
 
 		estimates = append(estimates, estimate{
 			AmbTypeID:   ambType.ID,

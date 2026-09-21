@@ -195,6 +195,30 @@ func (s *Store) UpdateAdminFCM(ctx context.Context, id string, fcmToken string) 
 	return err
 }
 
+// ListActiveAdminFCMTokens returns FCM tokens for active admins, used for
+// stopped-vehicle emergency escalation (mirrors the driver-offer push path).
+func (s *Store) ListActiveAdminFCMTokens(ctx context.Context) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `SELECT fcm_token FROM admins WHERE active=true AND fcm_token IS NOT NULL AND fcm_token<>''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tokens []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		if t != "" {
+			tokens = append(tokens, t)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return tokens, nil
+}
+
 func (s *Store) UpdateAdminLocation(ctx context.Context, id string, location *GeoJSON) error {
 	if !ids.IsValid(id) {
 		return fmt.Errorf("invalid admin id: %s", id)

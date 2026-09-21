@@ -40,6 +40,10 @@ type AppConfig struct {
 	ZwitchAccountID string
 	ZwitchAPIBaseURL string
 	ZwitchProxyURL  string
+	ZwitchWebhookSecret string
+
+	// Wallet (withdrawals)
+	WithdrawalFee float64
 
 	// Cloudshope (Call Masking)
 	CloudshopeToken      string
@@ -112,6 +116,8 @@ func LoadConfig() *AppConfig {
 		ZwitchAccountID:   os.Getenv("ZWITCH_ACCOUNT_ID"),
 		ZwitchAPIBaseURL:  envOrDefault("ZWITCH_API_BASE_URL", "https://api.zwitch.io/v1"),
 		ZwitchProxyURL:    os.Getenv("ZWITCH_PROXY_URL"),
+		ZwitchWebhookSecret: os.Getenv("ZWITCH_WEBHOOK_SECRET"),
+		WithdrawalFee:     envFloatOrDefault("WITHDRAWAL_FEE", 7),
 
 		CloudshopeToken:      os.Getenv("CLOUDSHOPE_TOKEN"),
 		CloudshopeNumber:     os.Getenv("CLOUDSHOPE_NUMBER"),
@@ -153,6 +159,15 @@ func envOrDefault(key, fallback string) string {
 func envIntOrDefault(key string, fallback int) int {
 	if v := os.Getenv(key); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	return fallback
+}
+
+func envFloatOrDefault(key string, fallback float64) float64 {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 {
 			return n
 		}
 	}

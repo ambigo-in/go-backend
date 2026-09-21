@@ -134,8 +134,10 @@ func main() {
 		ambTypeNames[t.ID] = t.Name
 	}
 	matcher := dispatch.NewMatcher(locationStore, routeClient, ambTypeNames)
+	matcher.SetHospitalDeps(adminStore, authStore)
 	dispatcher := dispatch.NewDispatcher(matcher, rideStore, eventBus, wsManager)
 	dispatcher.StartStaleRideCleanup()
+	wsManager.SetSafetyDeps(rideStore, adminStore, ambTypeNames)
 
 	// Set Google Translate API URL (used by package-level var)
 	translation.TranslateAPIURL = appConfig.GoogleTranslateAPIURL
@@ -159,7 +161,9 @@ func main() {
 	}
 
 	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg, appConfig.AllowStaleRefreshChain, referralService)
+	authHandler.SetMDStore(adminStore)
 	profileHandler := handlers.NewProfileHandler(authStore)
+	profileHandler.SetAdminStore(adminStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore, storageService)
 	mediaHandler := handlers.NewMediaHandler(storageService, appConfig.JWTSecret)
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, walletStore, appConfig.RazorpayWebhookSecret)
@@ -172,16 +176,25 @@ func main() {
 	hospitalDashboardHandler := handlers.NewHospitalDashboardHandler(rideStore, hospitalStore, adminStore, authStore, wsManager)
 	offerHandler := handlers.NewOfferHandler(offerStore, eventBus)
 	sharedHandler := handlers.NewSharedHandler(cloudshopeService, counterStore, adminStore, hospitalStore, hospitalSeeder)
+	sharedHandler.SetAppConfig(appConfig.WithdrawalFee, 30)
 	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
+	walletHandler.SetWithdrawalFee(appConfig.WithdrawalFee)
+	walletHandler.SetZwitchWebhookSecret(appConfig.ZwitchWebhookSecret)
+	// Settle stuck withdrawals: every 5m, resolve 'pending' rows older than 15m.
+	walletHandler.StartPendingSweeper(5*time.Minute, 15*time.Minute)
+	adminHandler.SetWalletStore(walletStore)
 	feedbackHandler := handlers.NewFeedbackHandler(feedbackStore)
 	referralHandler := handlers.NewReferralHandler(referralStore, referralService)
+	mdAmbulanceHandler := handlers.NewMDAmbulanceHandler(adminStore, authStore, eventBus)
 
 	// V16: Audit persistence (Postgres, TTL 30d via periodic DELETE)
 	auditStore := admin.NewAuditStore(pool)
 
 	// Subscribe EventBus Subscribers
 	websocket.NewWSNotifier(wsManager).SubscribeTo(eventBus)
-	eventbus.NewFCMNotifier(fcmClient, authStore).SubscribeTo(eventBus)
+	fcmNotifier := eventbus.NewFCMNotifier(fcmClient, authStore)
+	fcmNotifier.SetAdminStore(adminStore)
+	fcmNotifier.SubscribeTo(eventBus)
 	eventbus.NewMetricsCollector().SubscribeTo(eventBus)
 	eventbus.NewCacheInvalidator(counterStore).SubscribeTo(eventBus)
 	eventbus.NewAuditLogger(auditStore).SubscribeTo(eventBus)
@@ -311,6 +324,7 @@ func main() {
 	mux.Handle("POST /api/v2/shared/call/mask", jwtAuth(http.HandlerFunc(sharedHandler.HandleCallMask)))
 	mux.Handle("POST /api/v2/shared/updates/ambulance_types/check", http.HandlerFunc(sharedHandler.HandleCheckAmbulanceUpdates))
 	mux.Handle("POST /api/v2/shared/ambulance/types/list", http.HandlerFunc(sharedHandler.HandleListAmbulanceTypes)) // Note: V1 POST without Auth for lists? Actually V1 doesn't have auth for /list.
+	mux.Handle("POST /api/v2/shared/config", http.HandlerFunc(sharedHandler.HandleGetAppConfig))
 	mux.Handle("POST /api/v2/shared/updates/hospitals/check", http.HandlerFunc(sharedHandler.HandleCheckHospitalUpdates))
 	mux.Handle("POST /api/v2/shared/hospitals/list", http.HandlerFunc(sharedHandler.HandleListHospitals))
 	mux.Handle("POST /api/v2/shared/feedback/submit", jwtAuth(http.HandlerFunc(feedbackHandler.HandleSubmitFeedback)))
@@ -328,6 +342,11 @@ func main() {
 	mux.Handle("POST /api/v2/driver/wallet/update", requireDriver(http.HandlerFunc(walletHandler.HandleUpdateWallet)))
 	mux.Handle("POST /api/v2/driver/wallet/withdraw", requireDriver(http.HandlerFunc(walletHandler.HandleWithdraw)))
 	mux.Handle("POST /api/v2/driver/wallet/transactions/list", requireDriver(http.HandlerFunc(walletHandler.HandleListTransactions)))
+	// Zwitch webhooks: canonical V2 path + the two legacy dashboard URLs
+	// (transfers.updated + verifications.bank_account.created). Provider-signed.
+	mux.HandleFunc("POST /api/v2/payout/webhook/zwitch", walletHandler.HandleZwitchWebhook)
+	mux.HandleFunc("POST /payment/driver/complete-pending-transaction", walletHandler.HandleZwitchWebhook)
+	mux.HandleFunc("POST /payment/driver/verify-account-details", walletHandler.HandleZwitchWebhook)
 	// Driver attendant (one per ambulance, driver creates)
 	mux.Handle("POST /api/v2/driver/attendant/create", requireDriver(http.HandlerFunc(driverAttendantHandler.HandleDriverCreateAttendant)))
 	mux.Handle("POST /api/v2/driver/attendant/list", requireDriver(http.HandlerFunc(driverAttendantHandler.HandleDriverListAttendants)))
@@ -393,6 +412,7 @@ func main() {
 	mux.Handle("POST /api/v2/admin/drivers/details", requireAdmin(http.HandlerFunc(adminHandler.HandleGetDriverDetails)))
 	mux.Handle("POST /api/v2/admin/drivers/add", requireAdmin(http.HandlerFunc(adminHandler.HandleAddDriver)))
 	mux.Handle("POST /api/v2/admin/drivers/update", requireAdmin(http.HandlerFunc(adminHandler.HandleUpdateDriver)))
+	mux.Handle("POST /api/v2/admin/drivers/wallet/adjust", requireAdmin(http.HandlerFunc(adminHandler.HandleAdjustDriverWallet)))
 	mux.Handle("POST /api/v2/admin/drivers/delete", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteDriver)))
 	// Admin: Unverified Driver Flow
 	mux.Handle("POST /api/v2/admin/drivers/unverified/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListUnverifiedDrivers)))
@@ -419,13 +439,13 @@ func main() {
 	mux.Handle("POST /api/v2/admin/hospitals/add", requireAdmin(http.HandlerFunc(adminHandler.HandleAddHospital)))
 	mux.Handle("POST /api/v2/admin/hospitals/update", requireAdmin(http.HandlerFunc(adminHandler.HandleUpdateHospital)))
 	mux.Handle("POST /api/v2/admin/hospitals/delete", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteHospital)))
-	mux.Handle("POST /api/v2/admin/hospitals/sync", requireAdmin(http.HandlerFunc(sharedHandler.HandleSyncHospitals)))
-	// Admin: Hospital service areas (cities)
+	// Admin: Hospital service areas (cities) — per-area sync only (global sync removed to avoid timeout)
 	mux.Handle("POST /api/v2/admin/hospital/cities/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListHospitalCities)))
 	mux.Handle("POST /api/v2/admin/hospital/cities/add", requireAdmin(http.HandlerFunc(adminHandler.HandleAddHospitalCity)))
 	mux.Handle("POST /api/v2/admin/hospital/cities/update", requireAdmin(http.HandlerFunc(adminHandler.HandleUpdateHospitalCity)))
 	mux.Handle("POST /api/v2/admin/hospital/cities/delete", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteHospitalCity)))
-	mux.Handle("POST /api/v2/admin/hospital/cities/sync", requireAdmin(http.HandlerFunc(sharedHandler.HandleSyncHospitals)))
+	mux.Handle("POST /api/v2/admin/hospital/city/sync", requireAdmin(http.HandlerFunc(sharedHandler.HandleSyncHospitalCity)))
+	mux.Handle("POST /api/v2/admin/hospital/city/sync/status", requireAdmin(http.HandlerFunc(sharedHandler.HandleSyncHospitalCityStatus)))
 	// Hospital MD (public signup + OTP)
 	mux.HandleFunc("POST /api/v2/hospital/md/request-otp", middleware.RateLimit(hospitalAuthHandler.HandleHospitalMDRequestOTP, otpIPLimiter))
 	mux.HandleFunc("POST /api/v2/hospital/md/login/request-otp", middleware.RateLimit(hospitalAuthHandler.HandleHospitalMDLoginRequestOTP, otpIPLimiter))
@@ -461,9 +481,15 @@ func main() {
 	mux.Handle("POST /api/v2/hospital/rides/incoming/list", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalIncomingRides)))
 	mux.Handle("POST /api/v2/hospital/rides/history", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalHistory)))
 	mux.Handle("POST /api/v2/hospital/rides/detail", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalRideDetail)))
+	mux.Handle("POST /api/v2/hospital/rides/acknowledge", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleAcknowledgeRide)))
 	mux.Handle("POST /api/v2/hospital/profile", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalProfile)))
 	mux.Handle("POST /api/v2/hospital/profile/update", requireHospitalMD(http.HandlerFunc(hospitalDashboardHandler.HandleUpdateHospitalProfile)))
 	mux.Handle("POST /api/v2/hospital/analytics", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalAnalytics)))
+	// MD ambulances: Add Ambulance module (MD-scoped by hospital_id).
+	mux.Handle("POST /api/v2/hospital/ambulances/create", requireHospitalMD(http.HandlerFunc(mdAmbulanceHandler.HandleCreateAmbulance)))
+	mux.Handle("POST /api/v2/hospital/ambulances/list", requireHospitalMD(http.HandlerFunc(mdAmbulanceHandler.HandleListAmbulances)))
+	mux.Handle("POST /api/v2/hospital/ambulances/numbers/add", requireHospitalMD(http.HandlerFunc(mdAmbulanceHandler.HandleAddNumber)))
+	mux.Handle("POST /api/v2/hospital/ambulances/numbers/active", requireHospitalMD(http.HandlerFunc(mdAmbulanceHandler.HandleSetNumberActive)))
 	// In-ride patient condition update (ALS/BLS/Emergency/SOS) — user or attendant
 	mux.Handle("POST /api/v2/rides/condition", requireUserOrAttendant(http.HandlerFunc(hospitalDashboardHandler.HandleUpdateRideCondition)))
 	mux.Handle("POST /api/v2/rides/{id}/condition", requireUserOrAttendant(http.HandlerFunc(hospitalDashboardHandler.HandleUpdateRideCondition)))
@@ -493,6 +519,9 @@ func main() {
 			if _, err := authStore.CleanupExpiredRefreshTokens(ctx); err != nil {
 				log.Error().Err(err).Msg("refresh_tokens cleanup failed")
 			}
+			if _, err := walletStore.CleanupOldEvents(ctx); err != nil {
+				log.Error().Err(err).Msg("processed_events cleanup failed")
+			}
 			cancel()
 		}
 	}()
@@ -500,7 +529,7 @@ func main() {
 	// Apply API key auth + global rate limiter to all routes except /metrics, /health, and /ws
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if path == "/metrics" || path == "/api/v1/health" || path == "/ws" || path == "/api/v2/payment/webhook/razorpay" {
+		if path == "/metrics" || path == "/api/v1/health" || path == "/ws" || path == "/api/v2/payment/webhook/razorpay" || path == "/api/v2/payout/webhook/zwitch" || path == "/payment/driver/complete-pending-transaction" || path == "/payment/driver/verify-account-details" {
 			mux.ServeHTTP(w, r)
 			return
 		}

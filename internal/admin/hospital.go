@@ -6,6 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"sort"
+	"strings"
 	"time"
 
 	"ambigo-backend/internal/ids"
@@ -81,6 +84,104 @@ type Hospital struct {
 	Category     string         `db:"category" json:"category,omitempty"`
 	GoogleTypes  []string       `db:"google_types" json:"google_types,omitempty"`
 	TypeLocked   bool           `db:"type_locked" json:"type_locked,omitempty"`
+}
+
+// DuplicateMergeRadiusKm bounds coordinate-based duplicate matching.
+// A Google result or MD pin within this distance of a known hospital row
+// is treated as the same building (hospital campuses).
+const DuplicateMergeRadiusKm = 0.15
+
+func hospitalHaversineKm(lat1, lng1, lat2, lng2 float64) float64 {
+	const R = 6371.0
+	dLat := (lat2 - lat1) * math.Pi / 180.0
+	dLng := (lng2 - lng1) * math.Pi / 180.0
+	lat1Rad := lat1 * math.Pi / 180.0
+	lat2Rad := lat2 * math.Pi / 180.0
+	a := math.Sin(dLat/2)*math.Sin(dLat/2) + math.Cos(lat1Rad)*math.Cos(lat2Rad)*math.Sin(dLng/2)*math.Sin(dLng/2)
+	return R * 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
+}
+
+// FindNearby returns hospitals within radiusKm of lng/lat, nearest first.
+// It fetches the H3 bucket then filters by exact distance in Go.
+func (s *HospitalStore) FindNearby(ctx context.Context, lng, lat, radiusKm float64) ([]Hospital, error) {
+	cell := location.GetH3CellAtResolution(lat, lng, HospitalH3Resolution)
+	if cell == "" {
+		return []Hospital{}, nil
+	}
+	cells, err := location.GetNeighborCellsAtRing(cell, HospitalH3Ring)
+	if err != nil {
+		return nil, err
+	}
+	list, err := s.FindByCells(ctx, cells)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Hospital, 0, len(list))
+	for _, h := range list {
+		if len(h.Location.Coordinates) != 2 {
+			continue
+		}
+		h.DistanceKm = hospitalHaversineKm(lat, lng, h.Location.Coordinates[1], h.Location.Coordinates[0])
+		if h.DistanceKm <= radiusKm {
+			out = append(out, h)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].DistanceKm < out[j].DistanceKm })
+	return out, nil
+}
+
+// HospitalDisplayName returns the en_US name, falling back to any locale.
+func HospitalDisplayName(name translation.Map) string {
+	if s := strings.TrimSpace(name["en_US"]); s != "" {
+		return s
+	}
+	for _, s := range name {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func normalizeHospitalName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+// HospitalNamesMatch reports whether two hospital names plausibly denote the
+// same building (normalized containment either way, min 4 chars). Guards
+// against merging distinct neighboring clinics that share coordinates area.
+func HospitalNamesMatch(a, b string) bool {
+	na, nb := normalizeHospitalName(a), normalizeHospitalName(b)
+	if len(na) < 4 || len(nb) < 4 {
+		return false
+	}
+	return strings.Contains(na, nb) || strings.Contains(nb, na)
+}
+
+// PickMergeTarget selects the best duplicate-merge survivor from nearby rows
+// matching name. Rows already carrying a Google place_id win (future seeds
+// find them by place_id, preventing re-duplication); otherwise nearest first.
+func PickMergeTarget(candidates []Hospital, name string) *Hospital {
+	var best *Hospital
+	for i := range candidates {
+		if !HospitalNamesMatch(HospitalDisplayName(candidates[i].Name), name) {
+			continue
+		}
+		if best == nil {
+			best = &candidates[i]
+			continue
+		}
+		if best.PlaceID == "" && candidates[i].PlaceID != "" {
+			best = &candidates[i]
+		}
+	}
+	return best
 }
 
 // BuildH3Cells computes the H3 cell(s) covering the hospital's location.

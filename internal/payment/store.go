@@ -26,6 +26,12 @@ type Store struct {
 	db   DBTX
 }
 
+// ErrAlreadyPaid is returned by MarkPaymentPaid when the payment was already
+// settled by a concurrent confirm (app callback vs webhook). Callers must
+// treat it as idempotent success: return "already processed" WITHOUT
+// crediting the wallet again.
+var ErrAlreadyPaid = errors.New("payment already processed")
+
 // NewStore creates a Store backed by a pgxpool.Pool.
 func NewStore(pool *pgxpool.Pool) *Store {
 	return &Store{pool: pool, db: pool}
@@ -147,23 +153,29 @@ func (s *Store) FindPendingPaymentByPartnerID(ctx context.Context, partnerID str
 
 // MarkPaymentPaid marks a payment as complete with its Razorpay transaction ID.
 // It mirrors the Mongo `$set` + `$currentDate` update. The Postgres equivalent is:
-// `UPDATE payments SET paid=true, razorpay_payment_id=$2, payment_mode=$3, paid_at=now() WHERE id=$1 RETURNING *`
-// The method checks RowsAffected and returns an error if no row was updated
-// (not found or already paid).
+// `UPDATE payments SET paid=true, razorpay_payment_id=$2, payment_mode=$3, paid_at=now() WHERE id=$1 AND paid=false RETURNING *`
+// The `AND paid=false` guard makes concurrent confirms idempotent: exactly one
+// wins, the loser gets ErrAlreadyPaid and must treat it as success-without-credit.
+// Callers must NOT pre-check pmt.Paid outside the Tx (TOCTOU) — rely on this.
 func (s *Store) MarkPaymentPaid(ctx context.Context, id string, razorpayPaymentID string, paymentMode PaymentMode) error {
 	// Single-statement atomic update; row lock is implicit in UPDATE.
-	// Required PG SQL: `UPDATE payments SET paid=true, razorpay_payment_id=$2, payment_mode=$3, paid_at=now() WHERE id=$1 RETURNING *`
-	// We use Exec with that SQL and check RowsAffected for the guard. Using
-	// RETURNING * with Exec is equivalent and keeps the exact SQL visible for
-	// grep-ability; alternatively QueryRow with RETURNING * + ErrNoRows works.
 	tag, err := s.db.Exec(ctx,
-		`UPDATE payments SET paid=true, razorpay_payment_id=$2, payment_mode=$3, paid_at=now() WHERE id=$1 RETURNING *`,
+		`UPDATE payments SET paid=true, razorpay_payment_id=$2, payment_mode=$3, paid_at=now() WHERE id=$1 AND paid=false`,
 		id, razorpayPaymentID, paymentMode,
 	)
 	if err != nil {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
+		// Either the payment does not exist or it was already paid.
+		// Distinguish so callers can return idempotent success.
+		var exists bool
+		if qerr := s.db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM payments WHERE id=$1)`, id).Scan(&exists); qerr != nil {
+			return qerr
+		}
+		if exists {
+			return ErrAlreadyPaid
+		}
 		return errors.New("payment not found")
 	}
 	return nil

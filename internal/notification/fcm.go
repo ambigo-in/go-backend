@@ -74,6 +74,63 @@ func NewFCMClient(ctx context.Context, credentialsPath string) *FCMClient {
 	return &FCMClient{client: client, breaker: newFCMBreaker()}
 }
 
+// SendAlertMessage sends a data message with a visible notification block so
+// backgrounded or killed apps surface it in the system tray automatically.
+// Foreground apps receive data only (no auto-display) and must render their
+// own overlay/dialog from the data payload.
+func (f *FCMClient) SendAlertMessage(ctx context.Context, token, title, body string, data map[string]string) error {
+	if f.client == nil {
+		return nil
+	}
+
+	if f.breaker != nil && f.breaker.State() == gobreaker.StateOpen {
+		return fmt.Errorf("fcm circuit breaker open: %w", gobreaker.ErrOpenState)
+	}
+
+	_, err := f.breaker.Execute(func() (interface{}, error) {
+		return nil, retry.Do(ctx, retry.Default, func(ctx context.Context) error {
+			ctxTimeout, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+
+			if data == nil {
+				data = map[string]string{}
+			}
+			data["title"] = title
+			data["body"] = body
+
+			message := &messaging.Message{
+				Token: token,
+				Data:  data,
+				Notification: &messaging.Notification{
+					Title: title,
+					Body:  body,
+				},
+				Android: &messaging.AndroidConfig{
+					Priority: "high",
+					Notification: &messaging.AndroidNotification{
+						ChannelID:    "high_importance_channel",
+						Priority:     messaging.PriorityMax,
+						Sound:        "default",
+						DefaultSound: true,
+					},
+				},
+			}
+
+			response, err := f.client.Send(ctxTimeout, message)
+			if err != nil {
+				return fmt.Errorf("fcm send error: %v", err)
+			}
+
+			logger.Log.Info().Str("message_id", response).Msg("FCM alert sent successfully")
+			return nil
+		})
+	})
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 // SendDataMessage sends an FCM data message to a specific device token.
 func (f *FCMClient) SendDataMessage(ctx context.Context, token string, data map[string]string) error {
 	if f.client == nil {

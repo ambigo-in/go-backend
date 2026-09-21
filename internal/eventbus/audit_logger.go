@@ -31,6 +31,7 @@ func (l *AuditLogger) SubscribeTo(bus *InMemoryBus) {
 		ChannelAdminHospitalAdded, ChannelAdminHospitalUpdated, ChannelAdminHospitalDeleted,
 		ChannelAdminOfferCreated, ChannelAdminOfferDeleted,
 		ChannelAdminDriverRejected,
+		ChannelSafetyStoppedWarn, ChannelSafetyStoppedAlarm,
 	}
 	for _, ch := range channels {
 		bus.Subscribe(ch, l.handleEvent)

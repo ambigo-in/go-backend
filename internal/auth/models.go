@@ -46,6 +46,11 @@ type Driver struct {
 	VehicleReg         string         `db:"vehicle_registration" json:"vehicle_registration" validate:"required"`
 	WalletDetails      *WalletDetails `db:"wallet_details" json:"wallet_details,omitempty"`
 	WalletBalance      float64        `db:"wallet_balance" json:"wallet_balance"`
+	// WalletVerified gates the first payout: set only after bank-account
+	// verification (penny-drop / name-match) succeeds. Unverified drivers
+	// can save details but cannot withdraw.
+	WalletVerified   bool       `db:"wallet_verified" json:"wallet_verified"`
+	WalletVerifiedAt *time.Time `db:"wallet_verified_at" json:"wallet_verified_at,omitempty"`
 	ReferralCode       string         `db:"referral_code" json:"referral_code"`
 	MyReferralCode     string         `db:"my_referral_code" json:"my_referral_code,omitempty"`
 	Location           *GeoJSONPoint  `db:"location" json:"location,omitempty"`
@@ -53,6 +58,8 @@ type Driver struct {
 	JWTToken           *string        `db:"jwt_token" json:"jwt_token,omitempty"`
 	LastLocationUpdate *time.Time     `db:"last_location_update" json:"last_location_update,omitempty"`
 	Details            *DriverDetails `db:"details" json:"details,omitempty"`
+	// MDAmbulanceID is the effective MD ambulance (resolved live by mobile).
+	MDAmbulanceID *string `db:"md_ambulance_id" json:"md_ambulance_id,omitempty"`
 }
 
 type UnverifiedDriver struct {

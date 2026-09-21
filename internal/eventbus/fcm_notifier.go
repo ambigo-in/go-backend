@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/notification"
@@ -13,12 +14,18 @@ import (
 
 // FCMNotifier listens to ride events and sends FCM push notifications.
 type FCMNotifier struct {
-	fcmClient *notification.FCMClient
-	authStore *auth.Store
+	fcmClient  *notification.FCMClient
+	authStore  *auth.Store
+	adminStore *admin.Store
 }
 
 func NewFCMNotifier(fcmClient *notification.FCMClient, authStore *auth.Store) *FCMNotifier {
 	return &FCMNotifier{fcmClient: fcmClient, authStore: authStore}
+}
+
+// SetAdminStore wires admin tokens for stopped-vehicle escalation.
+func (n *FCMNotifier) SetAdminStore(adminStore *admin.Store) {
+	n.adminStore = adminStore
 }
 
 const fcmWorkerPoolSize = 10
@@ -32,6 +39,9 @@ func (n *FCMNotifier) SubscribeTo(bus *InMemoryBus) {
 	n.subscribeWithPool(bus, ChannelRideCancelled, n.handleRideCancelled)
 	n.subscribeWithPool(bus, ChannelAuthDriverApproved, n.handleDriverApproved)
 	n.subscribeWithPool(bus, ChannelReferralCredited, n.handleReferralCredited)
+	n.subscribeWithPool(bus, ChannelAuthSessionReplaced, n.handleSessionReplaced)
+	n.subscribeWithPool(bus, ChannelSafetyStoppedWarn, n.handleSafetyStoppedWarn)
+	n.subscribeWithPool(bus, ChannelSafetyStoppedAlarm, n.handleSafetyStoppedAlarm)
 }
 
 // subscribeWithPool creates a single shared channel via SubscribeWithChan and
@@ -89,21 +99,27 @@ func (n *FCMNotifier) handleRideOffered(payload []byte) {
 	}
 
 	data := map[string]string{
-		"type":            "RIDE_OFFERED",
-		"ride_id":         p.RideID,
-		"distance":        fmt.Sprintf("%.1f", p.TripDistanceKm),
-		"distance_km":     fmt.Sprintf("%.2f", p.TripDistanceKm),
-		"cost":            fmt.Sprintf("%.0f", p.DriverShare),
-		"fare":            fmt.Sprintf("%.2f", p.Fare),
-		"driver_share":    fmt.Sprintf("%.2f", p.DriverShare),
-		"pickup_lat":      fmt.Sprintf("%f", p.PickupLat),
-		"pickup_lng":      fmt.Sprintf("%f", p.PickupLng),
-		"pickup_address":  p.PickupAddress,
-		"dropoff_lat":     fmt.Sprintf("%f", p.DropoffLat),
-		"dropoff_lng":     fmt.Sprintf("%f", p.DropoffLng),
-		"drop_address":    p.DropAddress,
-		"payment_mode":    p.PaymentMode,
-		"body":            fmt.Sprintf("%.1f km · ₹%.0f", p.TripDistanceKm, p.DriverShare),
+		"type":                  "RIDE_OFFERED",
+		"ride_id":               p.RideID,
+		"distance":              fmt.Sprintf("%.1f", p.TripDistanceKm),
+		"distance_km":           fmt.Sprintf("%.2f", p.TripDistanceKm),
+		"cost":                  fmt.Sprintf("%.0f", p.DriverShare),
+		"fare":                  fmt.Sprintf("%.2f", p.Fare),
+		"driver_share":          fmt.Sprintf("%.2f", p.DriverShare),
+		"pickup_lat":            fmt.Sprintf("%f", p.PickupLat),
+		"pickup_lng":            fmt.Sprintf("%f", p.PickupLng),
+		"pickup_address":        p.PickupAddress,
+		"dropoff_lat":           fmt.Sprintf("%f", p.DropoffLat),
+		"dropoff_lng":           fmt.Sprintf("%f", p.DropoffLng),
+		"drop_address":          p.DropAddress,
+		"payment_mode":          p.PaymentMode,
+		"eta_seconds":           fmt.Sprintf("%d", p.ETASeconds),
+		"pickup_distance_km":    fmt.Sprintf("%.2f", p.PickupDistanceKm),
+		"trip_duration_seconds": fmt.Sprintf("%d", p.TripDurationSeconds),
+		"amb_type_id":           p.AmbTypeID,
+		"offered_at":            p.OfferedAt,
+		"offer_expires_in":      fmt.Sprintf("%d", p.OfferExpiresIn),
+		"body":                  fmt.Sprintf("%.1f km · ₹%.0f", p.TripDistanceKm, p.DriverShare),
 	}
 	if p.IsSOS {
 		data["title"] = "EMERGENCY ALERT"
@@ -315,6 +331,40 @@ func (n *FCMNotifier) handleRideCancelled(payload []byte) {
 	}
 }
 
+// handleSessionReplaced pushes the single-session kill-switch: every
+// superseded device's session token gets a SESSION_REVOKED data push, which
+// reaches the old phone in seconds even with no socket open or the app killed.
+func (n *FCMNotifier) handleSessionReplaced(payload []byte) {
+	var p AuthSessionReplacedPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "auth:session_replaced").Msg("Unmarshal error")
+		return
+	}
+	if p.UserID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	tokens, err := n.authStore.ListSupersededSessionFCMTokens(ctx, p.UserID, p.SessionID)
+	if err != nil {
+		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Kill-switch: failed to list superseded session tokens")
+		return
+	}
+	for _, token := range tokens {
+		data := map[string]string{
+			"type":   "SESSION_REVOKED",
+			"title":  "Logged in on another device",
+			"body":   "Your account was logged in on another device. You have been logged out.",
+			"is_sos": "false",
+		}
+		if err := n.fcmClient.SendDataMessage(ctx, token, data); err != nil {
+			logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Kill-switch FCM push failed")
+		}
+	}
+}
+
 func (n *FCMNotifier) handleDriverApproved(payload []byte) {
 	var p AuthDriverApprovedPayload
 	if err := json.Unmarshal(payload, &p); err != nil {
@@ -398,5 +448,108 @@ func (n *FCMNotifier) handleReferralCredited(payload []byte) {
 
 	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("recipient_id", p.RecipientID).Msg("Referral FCM push failed")
+	}
+}
+
+// handleSafetyStoppedWarn pushes the 3-minute nudge to the driver only,
+// reusing the driver-offer token lookup + data-message pattern.
+func (n *FCMNotifier) handleSafetyStoppedWarn(payload []byte) {
+	var p SafetyStoppedWarningPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "safety:stopped_warning").Msg("Unmarshal error")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	token, err := n.authStore.GetDriverFCMToken(ctx, p.DriverID)
+	if err != nil || token == nil || *token == "" {
+		return
+	}
+	data := map[string]string{
+		"type":            "STOPPED_WARNING",
+		"ride_id":         p.RideID,
+		"ride_ref":        p.RideRef,
+		"driver_id":       p.DriverID,
+		"stopped_minutes": fmt.Sprintf("%d", p.StoppedMinutes),
+		"lat":             fmt.Sprintf("%f", p.Lat),
+		"lng":             fmt.Sprintf("%f", p.Lng),
+		"title":           "Are you stopped?",
+		"body":            fmt.Sprintf("Stopped %d min on trip #%s — tap OK if all good.", p.StoppedMinutes, p.RideRef),
+	}
+	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+		logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Stopped-warning FCM push failed for driver")
+	}
+}
+
+// handleSafetyStoppedAlarm pushes the 5-minute escalation to driver, user,
+// and every active admin. Bodies carry contact details (who, in what, which
+// trip) instead of raw IDs so the admin notification is actionable on sight.
+// Admin pushes include a visible notification block so backgrounded/killed
+// admin apps still surface it in the tray; driver/user apps render their own
+// in-app banners from the data payload.
+func (n *FCMNotifier) handleSafetyStoppedAlarm(payload []byte) {
+	var p SafetyStoppedEmergencyPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "safety:stopped_emergency").Msg("Unmarshal error")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	who := p.DriverName
+	if who == "" {
+		who = "Driver"
+	}
+	if p.DriverMobile != "" {
+		who += " " + p.DriverMobile
+	}
+	amb := p.AmbTypeName
+	if amb == "" {
+		amb = "Ambulance"
+	}
+	title := "Stopped vehicle emergency"
+	body := fmt.Sprintf("%s • %s • stopped %d min • trip #%s.", amb, who, p.StoppedMinutes, p.RideRef)
+
+	base := map[string]string{
+		"type":            "STOPPED_EMERGENCY",
+		"ride_id":         p.RideID,
+		"ride_ref":        p.RideRef,
+		"driver_id":       p.DriverID,
+		"driver_name":     p.DriverName,
+		"driver_mobile":   p.DriverMobile,
+		"amb_type_name":   p.AmbTypeName,
+		"stopped_minutes": fmt.Sprintf("%d", p.StoppedMinutes),
+		"lat":             fmt.Sprintf("%f", p.Lat),
+		"lng":             fmt.Sprintf("%f", p.Lng),
+		"title":           title,
+		"body":            body,
+		"is_sos":          "true",
+	}
+
+	if token, err := n.authStore.GetDriverFCMToken(ctx, p.DriverID); err == nil && token != nil && *token != "" {
+		if err := n.fcmClient.SendDataMessage(ctx, *token, base); err != nil {
+			logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Stopped-emergency FCM push failed for driver")
+		}
+	}
+	if p.UserID != "" {
+		if token, err := n.authStore.GetUserFCMToken(ctx, p.UserID); err == nil && token != nil && *token != "" {
+			if err := n.fcmClient.SendDataMessage(ctx, *token, base); err != nil {
+				logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Stopped-emergency FCM push failed for user")
+			}
+		}
+	}
+	if n.adminStore == nil {
+		return
+	}
+	tokens, err := n.adminStore.ListActiveAdminFCMTokens(ctx)
+	if err != nil {
+		logger.Log.Error().Err(err).Msg("Stopped-emergency: failed to list admin FCM tokens")
+		return
+	}
+	for _, token := range tokens {
+		if err := n.fcmClient.SendAlertMessage(ctx, token, title, body, base); err != nil {
+			logger.Log.Error().Err(err).Msg("Stopped-emergency FCM push failed for admin")
+		}
 	}
 }

@@ -33,9 +33,33 @@ type Candidate struct {
 }
 
 type Matcher struct {
-	LocStore    *location.MemoryStore
-	RouteCli    *RouteClient
+	LocStore     *location.MemoryStore
+	RouteCli     *RouteClient
 	AmbTypeNames map[string]string // amb_type_id → display name
+
+	// HospitalDeps resolves MD-registered drivers for hospital-first dispatch.
+	// Nil-safe: when unset, FindBestHospitalDriver reports no candidate.
+	Hospitals hospitalDriverSource
+	Drivers   driverIDResolver
+}
+
+// hospitalDriverSource lists mobiles with an active link under a hospital.
+type hospitalDriverSource interface {
+	ListActiveDriverMobilesByHospital(ctx context.Context, hospitalID string) ([]string, error)
+}
+
+// driverIDResolver maps mobiles to verified driver IDs.
+type driverIDResolver interface {
+	FindDriverIDsByMobiles(ctx context.Context, mobiles []string) (map[string]string, error)
+}
+
+// HospitalFirstRadiusKm bounds hospital-first offers to drivers near pickup.
+const HospitalFirstRadiusKm = 10.0
+
+// SetHospitalDeps wires hospital-first dispatch (called from main after stores exist).
+func (m *Matcher) SetHospitalDeps(h hospitalDriverSource, d driverIDResolver) {
+	m.Hospitals = h
+	m.Drivers = d
 }
 
 func NewMatcher(ls *location.MemoryStore, rc *RouteClient, ambTypeNames map[string]string) *Matcher {
@@ -241,4 +265,73 @@ func (m *Matcher) FindBestDrivers(ctx context.Context, pickupLat, pickupLng floa
 	}
 
 	return candidates, nil
+}
+
+// FindBestHospitalDriver returns the single nearest AVAILABLE driver registered
+// under the given hospital within HospitalFirstRadiusKm of pickup.
+// It respects ambTypeID when non-empty and reports ok=false on any miss
+// (no hospital, no active links, none available/nearby), letting the caller
+// fall through to the normal flow.
+func (m *Matcher) FindBestHospitalDriver(ctx context.Context, hospitalID string, pickupLat, pickupLng float64, ambTypeID string) (Candidate, bool) {
+	var none Candidate
+	if m.Hospitals == nil || m.Drivers == nil || hospitalID == "" {
+		return none, false
+	}
+	mobiles, err := m.Hospitals.ListActiveDriverMobilesByHospital(ctx, hospitalID)
+	if err != nil || len(mobiles) == 0 {
+		return none, false
+	}
+	idByMobile, err := m.Drivers.FindDriverIDsByMobiles(ctx, mobiles)
+	if err != nil || len(idByMobile) == 0 {
+		return none, false
+	}
+
+	type scored struct {
+		id  string
+		km  float64
+		lat float64
+		lng float64
+	}
+	var scoredList []scored
+	for _, driverID := range idByMobile {
+		status, err := m.LocStore.GetDriverStatus(driverID)
+		if err != nil || status != interfaces.StatusAvailable {
+			continue
+		}
+		if ambTypeID != "" {
+			vType, err := m.LocStore.GetDriverVehicleType(driverID)
+			if err != nil || vType != ambTypeID {
+				continue
+			}
+		}
+		lat, lng, err := m.LocStore.GetLocation(driverID)
+		if err != nil {
+			continue
+		}
+		km := haversineKm(lat, lng, pickupLat, pickupLng)
+		if km > HospitalFirstRadiusKm {
+			continue
+		}
+		scoredList = append(scoredList, scored{id: driverID, km: km, lat: lat, lng: lng})
+	}
+	if len(scoredList) == 0 {
+		return none, false
+	}
+	sort.Slice(scoredList, func(i, j int) bool { return scoredList[i].km < scoredList[j].km })
+
+	// Nearest-first with ETA: one Google call for the best case, fall back
+	// down the list only if ETA resolution fails.
+	for _, s := range scoredList {
+		route, err := m.RouteCli.CalculateETA(ctx, s.lat, s.lng, pickupLat, pickupLng)
+		if err != nil {
+			continue
+		}
+		return Candidate{
+			DriverID:        s.id,
+			ETASeconds:      route.DurationSeconds,
+			DistanceKm:      route.DistanceKm,
+			EncodedPolyline: route.Polyline,
+		}, true
+	}
+	return none, false
 }

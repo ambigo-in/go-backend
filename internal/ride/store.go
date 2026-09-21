@@ -893,6 +893,22 @@ func (s *Store) UpdateRideFare(ctx context.Context, rideID string, fare *Fare) e
 	return err
 }
 
+// EscalateEmergencyForStoppedVehicle flips a normal IN_PROGRESS ride to
+// emergency priority after a confirmed 5-minute stop. The guarded WHERE
+// clause makes it idempotent: SOS rides, finished rides, or repeat calls
+// affect 0 rows and report escalated=false. Fare is intentionally untouched
+// (locked at booking time).
+func (s *Store) EscalateEmergencyForStoppedVehicle(ctx context.Context, rideID string) (bool, error) {
+	tag, err := s.db.Exec(ctx,
+		`UPDATE rides SET emergency_priority=10, emergency_type=COALESCE(NULLIF(emergency_type,''),'stopped_vehicle') WHERE id=$1::uuid AND status='IN_PROGRESS' AND emergency_priority=0`,
+		rideID,
+	)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // CancelStaleSearchingRides cancels all rides in SEARCHING state older than maxAge.
 // Returns the count of cancelled rides.
 func (s *Store) CancelStaleSearchingRides(ctx context.Context, maxAge time.Duration) (int64, error) {

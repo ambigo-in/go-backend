@@ -202,6 +202,46 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 	return err
 }
 
+// ClaimHighestByUser atomically consumes the user's highest-value offer and
+// returns its amount. The DELETE...RETURNING is a single statement: concurrent
+// consumers race on the row lock and exactly one wins (SKIP LOCKED lets the
+// loser take the next offer or report none). Returns claimed=false when the
+// user has no usable offer. This replaces read-then-delete, under which two
+// concurrent rides both spent the same credit.
+func (s *Store) ClaimHighestByUser(ctx context.Context, userID string) (amount float64, claimed bool, err error) {
+	var amt sql.NullFloat64
+	err = s.pool.QueryRow(ctx,
+		`DELETE FROM offers WHERE id = (
+			SELECT id FROM offers
+			WHERE user_id=$1 AND offer_amount IS NOT NULL AND offer_amount > 0
+			ORDER BY offer_amount DESC LIMIT 1
+			FOR UPDATE SKIP LOCKED
+		) RETURNING offer_amount`,
+		userID,
+	).Scan(&amt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, false, nil
+		}
+		return 0, false, err
+	}
+	if !amt.Valid || amt.Float64 <= 0 {
+		return 0, false, nil
+	}
+	return amt.Float64, true, nil
+}
+
+// RestoreCredit re-inserts a consumed offer (compensation when the ride that
+// consumed it ultimately fails). Value is preserved; identity is new —
+// callers must log the swap.
+func (s *Store) RestoreCredit(ctx context.Context, userID string, amount float64, description string) error {
+	return s.Create(ctx, &Offer{
+		Description: description,
+		UserID:      &userID,
+		OfferAmount: &amount,
+	})
+}
+
 // FindByUserID returns offers for a given user_id (TEXT) capped at 50. Returns empty slice when none.
 func (s *Store) FindByUserID(ctx context.Context, userID string) ([]Offer, error) {
 	rows, err := s.pool.Query(ctx,

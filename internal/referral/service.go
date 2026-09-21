@@ -13,6 +13,8 @@ import (
 	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/offer"
 	"ambigo-backend/internal/payment"
+
+	"github.com/jackc/pgx/v5"
 )
 
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789" // No I, O, 0, 1 to avoid confusion
@@ -235,17 +237,22 @@ func (s *Service) checkAndCreditForRide(ctx context.Context, entityID, role stri
 	}
 
 	for _, rec := range pending {
-		updated, err := s.store.IncrementRidesDone(ctx, rec.ID)
-		if err != nil {
-			logger.Log.Error().Err(err).Str("record_id", rec.ID).Msg("Failed to increment rides_done")
-			continue
-		}
+		// Count only while below threshold; at-threshold rows are retries of
+		// a failed credit and must not inflate the counter.
+		updated := &rec
+		if rec.RidesDone < rec.RidesRequired {
+			updated, err = s.store.IncrementRidesDone(ctx, rec.ID)
+			if err != nil {
+				logger.Log.Error().Err(err).Str("record_id", rec.ID).Msg("Failed to increment rides_done")
+				continue
+			}
 
-		logger.Log.Info().
-			Str("record_id", rec.ID).
-			Int("rides_done", updated.RidesDone).
-			Int("rides_required", updated.RidesRequired).
-			Msg("Referral ride count incremented")
+			logger.Log.Info().
+				Str("record_id", rec.ID).
+				Int("rides_done", updated.RidesDone).
+				Int("rides_required", updated.RidesRequired).
+				Msg("Referral ride count incremented")
+		}
 
 		// Check if threshold is now met
 		if updated.RidesDone >= updated.RidesRequired && !updated.ReferrerCredited {
@@ -255,6 +262,9 @@ func (s *Service) checkAndCreditForRide(ctx context.Context, entityID, role stri
 }
 
 // creditReferrer credits the referrer based on their role.
+// Atomicity: claim-flag + wallet credit + ledger row commit in ONE
+// transaction. Concurrent ride completions race on ClaimReferrerCredit;
+// exactly one wins and credits, losers return silently (idempotent).
 func (s *Service) creditReferrer(ctx context.Context, rec *Record) {
 	if rec.ReferrerAmount <= 0 {
 		_ = s.store.MarkReferrerCredited(ctx, rec.ID)
@@ -275,25 +285,62 @@ func (s *Service) creditReferrer(ctx context.Context, rec *Record) {
 			logger.Log.Error().Str("driver_id", rec.ReferrerID).Msg("Invalid referrer driver ID")
 			return
 		}
-		if err := s.walletStore.UpdateWalletBalance(ctx, rec.ReferrerID, rec.ReferrerAmount); err != nil {
+		err := WithTx(ctx, s.store.Pool(), func(tx pgx.Tx) error {
+			rTx := s.store.WithTx(tx)
+			wTx := s.walletStore.WithTx(tx)
+			claimed, err := rTx.ClaimReferrerCredit(ctx, rec.ID)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				return nil // lost the race; winner credited already
+			}
+			if err := wTx.UpdateWalletBalance(ctx, rec.ReferrerID, rec.ReferrerAmount); err != nil {
+				return err
+			}
+			bal, berr := wTx.GetBalance(ctx, rec.ReferrerID)
+			if berr != nil {
+				return berr
+			}
+			return wTx.InsertLedgerEntry(ctx, &payment.WalletTransaction{
+				DriverID:    rec.ReferrerID,
+				Amount:      rec.ReferrerAmount,
+				Direction:   "credit",
+				TxnType:     "referral_credit",
+				ReferenceID: rec.ID,
+				Status:      "success",
+				BalanceAfter: &bal,
+			})
+		})
+		if err != nil {
 			logger.Log.Error().Err(err).Str("driver_id", rec.ReferrerID).Float64("amount", rec.ReferrerAmount).Msg("Failed to credit referrer driver wallet")
 			return
 		}
 	case "user":
+		// Claim-first (atomic CAS): exactly one concurrent worker wins.
+		// Then create the offer. If creation fails, the miss is parked for
+		// ops (manual re-issue) — strictly better than the old order, which
+		// double-credited on every race.
+		claimed, cerr := s.store.ClaimReferrerCredit(ctx, rec.ID)
+		if cerr != nil {
+			logger.Log.Error().Err(cerr).Str("record_id", rec.ID).Msg("Failed to claim referrer credit")
+			return
+		}
+		if !claimed {
+			return // lost the race; winner is creating (or created) the offer
+		}
 		// Credit user via offers collection
-		desc := fmt.Sprintf("Referral bonus: ₹%.0f credit", rec.ReferrerAmount)
+		desc := fmt.Sprintf("Referral bonus: Rs.%.0f credit", rec.ReferrerAmount)
 		userOffer := &offer.Offer{
 			Description: desc,
 			UserID:      &rec.ReferrerID,
 			OfferAmount: &rec.ReferrerAmount,
 		}
 		if err := s.offerStore.Create(ctx, userOffer); err != nil {
-			logger.Log.Error().Err(err).Str("user_id", rec.ReferrerID).Float64("amount", rec.ReferrerAmount).Msg("Failed to credit referrer user offer")
+			logger.Log.Error().Err(err).Str("user_id", rec.ReferrerID).Float64("amount", rec.ReferrerAmount).Str("record_id", rec.ID).Msg("PARKED FOR OPS: referrer credit claimed but offer not created — re-issue manually")
 			return
 		}
 	}
-
-	_ = s.store.MarkReferrerCredited(ctx, rec.ID)
 
 	logger.Log.Info().
 		Str("referrer_id", rec.ReferrerID).
@@ -321,30 +368,63 @@ func (s *Service) creditReferee(ctx context.Context, rec *Record) {
 
 	switch rec.RefereeRole {
 	case "driver":
-		// Credit driver wallet
+		// Credit driver wallet — claim + credit + ledger in one Tx.
 		if !ids.IsValid(rec.RefereeID) {
 			logger.Log.Error().Str("driver_id", rec.RefereeID).Msg("Invalid referee driver ID")
 			return
 		}
-		if err := s.walletStore.UpdateWalletBalance(ctx, rec.RefereeID, rec.RefereeAmount); err != nil {
+		err := WithTx(ctx, s.store.Pool(), func(tx pgx.Tx) error {
+			rTx := s.store.WithTx(tx)
+			wTx := s.walletStore.WithTx(tx)
+			claimed, err := rTx.ClaimRefereeCredit(ctx, rec.ID)
+			if err != nil {
+				return err
+			}
+			if !claimed {
+				return nil
+			}
+			if err := wTx.UpdateWalletBalance(ctx, rec.RefereeID, rec.RefereeAmount); err != nil {
+				return err
+			}
+			bal, berr := wTx.GetBalance(ctx, rec.RefereeID)
+			if berr != nil {
+				return berr
+			}
+			return wTx.InsertLedgerEntry(ctx, &payment.WalletTransaction{
+				DriverID:    rec.RefereeID,
+				Amount:      rec.RefereeAmount,
+				Direction:   "credit",
+				TxnType:     "referral_credit",
+				ReferenceID: rec.ID,
+				Status:      "success",
+				BalanceAfter: &bal,
+			})
+		})
+		if err != nil {
 			logger.Log.Error().Err(err).Str("driver_id", rec.RefereeID).Float64("amount", rec.RefereeAmount).Msg("Failed to credit referee driver wallet")
 			return
 		}
 	case "user":
+		claimed, cerr := s.store.ClaimRefereeCredit(ctx, rec.ID)
+		if cerr != nil {
+			logger.Log.Error().Err(cerr).Str("record_id", rec.ID).Msg("Failed to claim referee credit")
+			return
+		}
+		if !claimed {
+			return
+		}
 		// Credit user via offers collection
-		desc := fmt.Sprintf("Welcome bonus: ₹%.0f referral credit", rec.RefereeAmount)
+		desc := fmt.Sprintf("Welcome bonus: Rs.%.0f referral credit", rec.RefereeAmount)
 		userOffer := &offer.Offer{
 			Description: desc,
 			UserID:      &rec.RefereeID,
 			OfferAmount: &rec.RefereeAmount,
 		}
 		if err := s.offerStore.Create(ctx, userOffer); err != nil {
-			logger.Log.Error().Err(err).Str("user_id", rec.RefereeID).Float64("amount", rec.RefereeAmount).Msg("Failed to credit referee user offer")
+			logger.Log.Error().Err(err).Str("user_id", rec.RefereeID).Float64("amount", rec.RefereeAmount).Str("record_id", rec.ID).Msg("PARKED FOR OPS: referee credit claimed but offer not created — re-issue manually")
 			return
 		}
 	}
-
-	_ = s.store.MarkRefereeCredited(ctx, rec.ID)
 
 	logger.Log.Info().
 		Str("referee_id", rec.RefereeID).
@@ -478,32 +558,29 @@ func (s *Service) GetRewards(ctx context.Context, entityID, role string) (*Rewar
 }
 
 func (s *Service) ConsumeUserReferralCredit(ctx context.Context, userID string) (float64, error) {
-	offers, err := s.offerStore.FindByUserID(ctx, userID)
+	amount, claimed, err := s.offerStore.ClaimHighestByUser(ctx, userID)
 	if err != nil {
 		return 0, err
 	}
-
-	// Find the highest OfferAmount
-	var maxAmount float64
-	var maxOffer *offer.Offer
-	for _, o := range offers {
-		if o.OfferAmount != nil && *o.OfferAmount > maxAmount {
-			maxAmount = *o.OfferAmount
-			maxOffer = &o
-		}
-	}
-
-	if maxOffer == nil || maxAmount <= 0 {
+	if !claimed {
 		return 0, nil
 	}
 
-	if err := s.offerStore.Delete(ctx, maxOffer.ID); err != nil {
-		logger.Log.Error().Err(err).Str("user_id", userID).Float64("amount", maxAmount).Msg("Failed to delete consumed referral offer")
-		return 0, err
-	}
+	logger.Log.Info().Str("user_id", userID).Float64("amount", amount).Msg("Referral credit consumed")
+	return amount, nil
+}
 
-	logger.Log.Info().Str("user_id", userID).Float64("amount", maxAmount).Msg("Referral credit consumed")
-	return maxAmount, nil
+// RestoreUserReferralCredit compensates a consumed-then-failed ride: the
+// discount value is re-issued so the user never loses credit for a ride that
+// did not complete. Callers must invoke it on every failure path after a
+// successful ConsumeUserReferralCredit.
+func (s *Service) RestoreUserReferralCredit(ctx context.Context, userID string, amount float64) {
+	if amount <= 0 {
+		return
+	}
+	if err := s.offerStore.RestoreCredit(ctx, userID, amount, "Restored referral credit (ride not completed)"); err != nil {
+		logger.Log.Error().Err(err).Str("user_id", userID).Float64("amount", amount).Msg("PARKED FOR OPS: failed to restore consumed referral credit")
+	}
 }
 
 // randomCode generates a random string of the given length from the code alphabet.

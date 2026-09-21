@@ -57,11 +57,11 @@ func (h *DriverAttendantHandler) HandleDriverCreateAttendant(w http.ResponseWrit
 		existing.AssignedDriverID = &driverID
 		existing.Active = true
 		if err := h.AuthStore.UpdateAmbulanceAttendant(r.Context(), existing); err != nil {
-			response.Error(w, "Failed to update attendant", http.StatusInternalServerError)
+			response.Error(w, "Failed to update paramedic", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"detail": "Attendant updated", "id": existing.ID})
+		json.NewEncoder(w).Encode(map[string]string{"detail": "Paramedic updated", "id": existing.ID})
 		return
 	}
 	att := &auth.AmbulanceAttendant{
@@ -70,11 +70,11 @@ func (h *DriverAttendantHandler) HandleDriverCreateAttendant(w http.ResponseWrit
 		AssignedDriverID: &driverID,
 	}
 	if err := h.AuthStore.CreateAmbulanceAttendant(r.Context(), att); err != nil {
-		response.Error(w, "Failed to create attendant", http.StatusInternalServerError)
+		response.Error(w, "Failed to create paramedic", http.StatusInternalServerError)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"detail": "Attendant added", "id": att.ID})
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Paramedic added", "id": att.ID})
 }
 
 func (h *DriverAttendantHandler) HandleDriverListAttendants(w http.ResponseWriter, r *http.Request) {
@@ -125,5 +125,5 @@ func (h *DriverAttendantHandler) HandleDriverDeleteAttendant(w http.ResponseWrit
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"detail": "Attendant removed"})
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Paramedic removed"})
 }

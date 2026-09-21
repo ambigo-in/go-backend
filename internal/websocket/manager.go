@@ -7,11 +7,14 @@ import (
 	"sync"
 	"time"
 
+	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/location"
 	"ambigo-backend/internal/logger"
 	"ambigo-backend/internal/metrics"
+	"ambigo-backend/internal/ride"
+	"ambigo-backend/internal/safety"
 
 	"github.com/gorilla/websocket"
 )
@@ -79,6 +82,18 @@ type Manager struct {
 
 	// EventBus for publishing driver location updates
 	EventBus *eventbus.InMemoryBus
+
+	// RideStore validates stopped-vehicle eligibility (IN_PROGRESS + normal).
+	RideStore *ride.Store
+
+	// AdminStore resolves ambulance type names for auto/bike/cab exclusion.
+	AdminStore *admin.Store
+
+	// AmbTypeNames caches amb_type_id -> display name (same map as dispatcher matcher).
+	AmbTypeNames map[string]string
+
+	// Safety tracks per-driver stopped state for the 3/5-minute stages.
+	Safety *safety.Tracker
 }
 
 func NewManager(locStore *location.MemoryStore, authStore *auth.Store, eventBus *eventbus.InMemoryBus) *Manager {
@@ -95,6 +110,19 @@ func NewManager(locStore *location.MemoryStore, authStore *auth.Store, eventBus 
 		LocStore:         locStore,
 		AuthStore:        authStore,
 		EventBus:         eventBus,
+		Safety:           safety.NewTracker(),
+	}
+}
+
+// SetSafetyDeps wires stopped-vehicle dependencies (called from main after stores exist).
+func (m *Manager) SetSafetyDeps(rideStore *ride.Store, adminStore *admin.Store, ambTypeNames map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.RideStore = rideStore
+	m.AdminStore = adminStore
+	m.AmbTypeNames = ambTypeNames
+	if m.Safety == nil {
+		m.Safety = safety.NewTracker()
 	}
 }
 
@@ -332,6 +360,9 @@ func (m *Manager) SetActiveRide(driverID, rideID string) {
 	if m.LocStore != nil {
 		m.LocStore.SetDriverStatus(driverID, "BUSY")
 	}
+	if m.Safety != nil {
+		m.Safety.Reset(driverID)
+	}
 }
 
 func (m *Manager) ClearActiveRide(driverID string) {
@@ -340,6 +371,35 @@ func (m *Manager) ClearActiveRide(driverID string) {
 	delete(m.activeDriverRide, driverID)
 	if m.LocStore != nil {
 		m.LocStore.SetDriverStatus(driverID, "AVAILABLE")
+	}
+	if m.Safety != nil {
+		m.Safety.Reset(driverID)
+	}
+}
+
+// BroadcastToRole sends a message to every connected client with the given
+// role (e.g. all "admin" app connections). Used for stopped-vehicle
+// escalation where no single admin ID is the target.
+func (m *Manager) BroadcastToRole(role, msgType string, payload interface{}) {
+	rawPayload, err := json.Marshal(payload)
+	if err != nil {
+		logger.Log.Error().Err(err).Str("role", role).Msg("failed to marshal broadcast payload")
+		return
+	}
+	finalMsg, err := json.Marshal(BaseMessage{Type: msgType, Payload: rawPayload})
+	if err != nil {
+		return
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	for _, clientsForID := range m.clients[role] {
+		for client := range clientsForID {
+			select {
+			case client.Send <- finalMsg:
+			default:
+				metrics.WSMessagesDropped.WithLabelValues(client.Role, msgType, "send_buffer_full").Inc()
+			}
+		}
 	}
 }
 
