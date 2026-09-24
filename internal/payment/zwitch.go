@@ -80,7 +80,7 @@ func NewZwitchService(key, secret, accountID, apiBaseURL, proxyURL string) *Zwit
 }
 
 func (s *ZwitchService) setHeaders(req *http.Request) {
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s:%s", s.KeyID, s.Secret))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer  %s:%s", s.KeyID, s.Secret))
 	req.Header.Set("Content-Type", "application/json")
 }
 
