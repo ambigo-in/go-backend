@@ -223,7 +223,7 @@ func validateWalletDetails(d *auth.WalletDetails) error {
 // async verifications.bank_account.created webhook can correlate even when
 // the synchronous call is inconclusive.
 func (h *WalletHandler) verifyAndMarkAccount(r *http.Request, driverID string, acc *auth.WalletDetails) error {
-	ref := fmt.Sprintf("V%s", ids.New())
+	ref := fmt.Sprintf("V%s", strings.ReplaceAll(ids.New(), "-", ""))
 	if serr := h.WalletStore.SetWalletVerifyRef(r.Context(), driverID, ref); serr != nil {
 		return serr
 	}
@@ -311,7 +311,7 @@ func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 			h.writeWithdrawalStatus(w, r, uidStr, dup.MerchantReferenceID)
 			return
 		}
-		merchantRefID = "W" + ids.New()
+		merchantRefID = "W" + strings.ReplaceAll(ids.New(), "-", "")
 	}
 	if len(merchantRefID) > 64 {
 		response.Error(w, "Idempotency key too long", http.StatusBadRequest)

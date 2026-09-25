@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"ambigo-backend/internal/ids"
@@ -164,7 +165,7 @@ func (s *WalletStore) InsertLedgerEntry(ctx context.Context, e *WalletTransactio
 		return errors.New("InsertLedgerEntry requires a direction")
 	}
 	if e.MerchantReferenceID == "" {
-		e.MerchantReferenceID = "L" + ids.New()
+		e.MerchantReferenceID = "L" + strings.ReplaceAll(ids.New(), "-", "")
 	}
 	if e.Status == "" {
 		e.Status = "success"

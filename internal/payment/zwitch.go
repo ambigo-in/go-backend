@@ -80,7 +80,7 @@ func NewZwitchService(key, secret, accountID, apiBaseURL, proxyURL string) *Zwit
 }
 
 func (s *ZwitchService) setHeaders(req *http.Request) {
-	req.Header.Set("Authorization", fmt.Sprintf("Bearer  %s:%s", s.KeyID, s.Secret))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s:%s", s.KeyID, s.Secret))
 	req.Header.Set("Content-Type", "application/json")
 }
 
@@ -130,7 +130,13 @@ func (s *ZwitchService) VerifyBankAccount(acc *auth.WalletDetails, referenceID s
 			defer resp.Body.Close()
 
 			if resp.StatusCode >= 400 {
-				return zwitchErr("verification", resp.StatusCode)
+				respBody, _ := io.ReadAll(resp.Body)
+				logger.Log.Error().Int("status", resp.StatusCode).Str("body", string(respBody)).Msg("Zwitch verification failed")
+				err := zwitchErr("verification", resp.StatusCode)
+				if nre, ok := err.(*retry.NonRetryableError); ok {
+					return &retry.NonRetryableError{Err: fmt.Errorf("%w - %s", nre.Err, string(respBody))}
+				}
+				return fmt.Errorf("%w - %s", err, string(respBody))
 			}
 
 			var data map[string]interface{}
@@ -294,8 +300,14 @@ func (s *ZwitchService) CreateTransfer(acc *auth.WalletDetails, amount float64, 
 			json.NewDecoder(resp.Body).Decode(&data)
 
 			if resp.StatusCode >= 400 {
+				respBody, _ := json.Marshal(data)
+				logger.Log.Error().Int("status", resp.StatusCode).Str("body", string(respBody)).Msg("Zwitch transfer failed")
 				result = data
-				return zwitchErr("transfer", resp.StatusCode)
+				err := zwitchErr("transfer", resp.StatusCode)
+				if nre, ok := err.(*retry.NonRetryableError); ok {
+					return &retry.NonRetryableError{Err: fmt.Errorf("%w - %s", nre.Err, string(respBody))}
+				}
+				return fmt.Errorf("%w - %s", err, string(respBody))
 			}
 
 			result = data
