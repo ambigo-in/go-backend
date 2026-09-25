@@ -231,7 +231,7 @@ func (h *WalletHandler) verifyAndMarkAccount(r *http.Request, driverID string, a
 	if err != nil {
 		return err
 	}
-	if !strings.EqualFold(strings.TrimSpace(status), "success") {
+	if !isVerificationSuccess(status) {
 		return fmt.Errorf("bank verification inconclusive: %s", status)
 	}
 	return payment.WithTx(r.Context(), h.WalletStore.Pool(), func(tx pgx.Tx) error {

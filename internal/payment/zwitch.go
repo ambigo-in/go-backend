@@ -21,12 +21,15 @@ import (
 )
 
 type ZwitchService struct {
-	KeyID      string
-	Secret     string
-	AccountID  string
-	APIBaseURL string
-	Client     *http.Client
-	breaker    *gobreaker.CircuitBreaker
+	KeyID                 string
+	Secret                string
+	VerificationKeyID     string
+	VerificationSecret    string
+	AccountID             string
+	VerificationAccountID string
+	APIBaseURL            string
+	Client                *http.Client
+	breaker               *gobreaker.CircuitBreaker
 }
 
 func newZwitchBreaker() *gobreaker.CircuitBreaker {
@@ -59,7 +62,16 @@ func newZwitchBreaker() *gobreaker.CircuitBreaker {
 	})
 }
 
-func NewZwitchService(key, secret, accountID, apiBaseURL, proxyURL string) *ZwitchService {
+func NewZwitchService(key, secret, verificationKey, verificationSecret, accountID, verificationAccountID, apiBaseURL, proxyURL string) *ZwitchService {
+	if verificationKey == "" {
+		verificationKey = key
+	}
+	if verificationSecret == "" {
+		verificationSecret = secret
+	}
+	if verificationAccountID == "" {
+		verificationAccountID = accountID
+	}
 	transport := &http.Transport{}
 	if proxyURL != "" {
 		if u, err := url.Parse(proxyURL); err == nil {
@@ -67,10 +79,13 @@ func NewZwitchService(key, secret, accountID, apiBaseURL, proxyURL string) *Zwit
 		}
 	}
 	return &ZwitchService{
-		KeyID:      key,
-		Secret:     secret,
-		AccountID:  accountID,
-		APIBaseURL: apiBaseURL,
+		KeyID:                 key,
+		Secret:                secret,
+		VerificationKeyID:     verificationKey,
+		VerificationSecret:    verificationSecret,
+		AccountID:             accountID,
+		VerificationAccountID: verificationAccountID,
+		APIBaseURL:            apiBaseURL,
 		Client: &http.Client{
 			Timeout:   10 * time.Second,
 			Transport: transport,
@@ -81,6 +96,19 @@ func NewZwitchService(key, secret, accountID, apiBaseURL, proxyURL string) *Zwit
 
 func (s *ZwitchService) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s:%s", s.KeyID, s.Secret))
+	req.Header.Set("Content-Type", "application/json")
+}
+
+func (s *ZwitchService) setVerificationHeaders(req *http.Request) {
+	key := s.VerificationKeyID
+	if key == "" {
+		key = s.KeyID
+	}
+	secret := s.VerificationSecret
+	if secret == "" {
+		secret = s.Secret
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s:%s", key, secret))
 	req.Header.Set("Content-Type", "application/json")
 }
 
@@ -118,10 +146,14 @@ func (s *ZwitchService) VerifyBankAccount(acc *auth.WalletDetails, referenceID s
 				"bank_ifsc_code":          acc.IFSCCode,
 				"merchant_reference_id":   referenceID,
 			}
+			if s.VerificationAccountID != "" {
+				payload["debit_account_id"] = s.VerificationAccountID
+				payload["account_id"] = s.VerificationAccountID
+			}
 
 			body, _ := json.Marshal(payload)
 			req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
-			s.setHeaders(req)
+			s.setVerificationHeaders(req)
 
 			resp, err := s.Client.Do(req)
 			if err != nil {

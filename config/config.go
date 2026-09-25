@@ -35,10 +35,13 @@ type AppConfig struct {
 	RazorpayWebhookSecret string
 
 	// Zwitch (Bank Payouts)
-	ZwitchKey       string
-	ZwitchSecret    string
-	ZwitchAccountID string
-	ZwitchAPIBaseURL string
+	ZwitchKey                   string
+	ZwitchSecret                string
+	ZwitchVerificationKey       string
+	ZwitchVerificationSecret    string
+	ZwitchAccountID             string
+	ZwitchVerificationAccountID string
+	ZwitchAPIBaseURL            string
 	ZwitchProxyURL  string
 	ZwitchWebhookSecret string
 
@@ -111,10 +114,13 @@ func LoadConfig() *AppConfig {
 		RazorpayKeySecret:      os.Getenv("RAZORPAY_KEY_SECRET"),
 		RazorpayWebhookSecret: os.Getenv("RAZORPAY_WEBHOOK_SECRET"),
 
-		ZwitchKey:         os.Getenv("ZWITCH_KEY"),
-		ZwitchSecret:      os.Getenv("ZWITCH_SECRET"),
-		ZwitchAccountID:   os.Getenv("ZWITCH_ACCOUNT_ID"),
-		ZwitchAPIBaseURL:  envOrDefault("ZWITCH_API_BASE_URL", "https://api.zwitch.io/v1"),
+		ZwitchKey:                   os.Getenv("ZWITCH_KEY"),
+		ZwitchSecret:                os.Getenv("ZWITCH_SECRET"),
+		ZwitchVerificationKey:       envOrDefault("ZWITCH_VERIFICATION_KEY", os.Getenv("ZWITCH_KEY")),
+		ZwitchVerificationSecret:    envOrDefault("ZWITCH_VERIFICATION_SECRET", os.Getenv("ZWITCH_SECRET")),
+		ZwitchAccountID:             os.Getenv("ZWITCH_ACCOUNT_ID"),
+		ZwitchVerificationAccountID: envOrDefault("ZWITCH_VERIFICATION_ACCOUNT_ID", os.Getenv("ZWITCH_ACCOUNT_ID")),
+		ZwitchAPIBaseURL:            envOrDefault("ZWITCH_API_BASE_URL", "https://api.zwitch.io/v1"),
 		ZwitchProxyURL:    os.Getenv("ZWITCH_PROXY_URL"),
 		ZwitchWebhookSecret: os.Getenv("ZWITCH_WEBHOOK_SECRET"),
 		WithdrawalFee:     envFloatOrDefault("WITHDRAWAL_FEE", 7),
