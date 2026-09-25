@@ -146,11 +146,6 @@ func (s *ZwitchService) VerifyBankAccount(acc *auth.WalletDetails, referenceID s
 				"bank_ifsc_code":          acc.IFSCCode,
 				"merchant_reference_id":   referenceID,
 			}
-			if s.VerificationAccountID != "" {
-				payload["debit_account_id"] = s.VerificationAccountID
-				payload["account_id"] = s.VerificationAccountID
-			}
-
 			body, _ := json.Marshal(payload)
 			req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
 			s.setVerificationHeaders(req)
