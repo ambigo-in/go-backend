@@ -94,6 +94,61 @@ type Manager struct {
 
 	// Safety tracks per-driver stopped state for the 3/5-minute stages.
 	Safety *safety.Tracker
+
+	// locThrottle caps location fan-out: max 1 bus event per driver per
+	// interval (giants: ~1 per 3s). Extra pings still update the store.
+	locThrottleMu sync.Mutex
+	locThrottle   map[string]time.Time
+}
+
+// LocationPublishInterval is the minimum gap between location bus events for
+// one driver. Stale points are dropped, latest wins — same rule as Uber RAMEN.
+const LocationPublishInterval = 3 * time.Second
+
+// allowLocPublish reports whether a location event for driverID may be
+// published now, and records the attempt.
+func (m *Manager) allowLocPublish(driverID string) bool {
+	now := time.Now()
+	m.locThrottleMu.Lock()
+	defer m.locThrottleMu.Unlock()
+	if m.locThrottle == nil {
+		m.locThrottle = make(map[string]time.Time)
+	}
+	if last, ok := m.locThrottle[driverID]; ok && now.Sub(last) < LocationPublishInterval {
+		return false
+	}
+	m.locThrottle[driverID] = now
+	// Opportunistic cleanup so the map can't grow with logged-out drivers.
+	if len(m.locThrottle) > 10000 {
+		for id, ts := range m.locThrottle {
+			if now.Sub(ts) > time.Hour {
+				delete(m.locThrottle, id)
+			}
+		}
+	}
+	return true
+}
+
+// removeClientLocked evicts one connection from all maps, closes its Send
+// channel and socket. Caller must hold m.mu.
+func (m *Manager) removeClientLocked(client *Client) {
+	if clientsForID, ok := m.clients[client.Role][client.ID]; ok {
+		if _, exists := clientsForID[client]; exists {
+			delete(clientsForID, client)
+			close(client.Send)
+			metrics.ActiveConnections.Dec()
+		}
+		if len(clientsForID) == 0 {
+			delete(m.clients[client.Role], client.ID)
+		}
+	}
+	for rideID, watchers := range m.rideWatchers {
+		delete(watchers, client)
+		if len(watchers) == 0 {
+			delete(m.rideWatchers, rideID)
+		}
+	}
+	client.Conn.Close()
 }
 
 func NewManager(locStore *location.MemoryStore, authStore *auth.Store, eventBus *eventbus.InMemoryBus) *Manager {
@@ -152,6 +207,9 @@ func (m *Manager) Run() {
 			if m.clients[client.Role][client.ID] == nil {
 				m.clients[client.Role][client.ID] = make(map[*Client]bool)
 			}
+			// NOTE (operator decision): no same-session eviction here. Reconnects
+			// accumulate until their read deadlines expire so a live connection
+			// holding an undelivered offer is never killed mid-delivery.
 			m.clients[client.Role][client.ID][client] = true
 			m.mu.Unlock()
 			metrics.ActiveConnections.Inc()
@@ -190,19 +248,8 @@ func (m *Manager) Run() {
 			m.mu.Lock()
 			if clientsForID, ok := m.clients[client.Role][client.ID]; ok {
 				if _, exists := clientsForID[client]; exists {
-					delete(clientsForID, client)
-					close(client.Send)
-					metrics.ActiveConnections.Dec()
+					m.removeClientLocked(client)
 					logger.Log.Info().Str("role", client.Role).Str("id", client.ID).Msg("WebSocket unregistered")
-				}
-				if len(clientsForID) == 0 {
-					delete(m.clients[client.Role], client.ID)
-				}
-			}
-			for rideID, watchers := range m.rideWatchers {
-				delete(watchers, client)
-				if len(watchers) == 0 {
-					delete(m.rideWatchers, rideID)
 				}
 			}
 			m.mu.Unlock()
@@ -405,8 +452,12 @@ func (m *Manager) BroadcastToRole(role, msgType string, payload interface{}) {
 
 // HandleIncomingMessage parses messages sent from a client to the server
 func (m *Manager) HandleIncomingMessage(client *Client, message []byte) {
-	// Support raw text ping from frontend without JSON parsing errors
-	if string(message) == "ping" {
+	// Support raw text ping from frontend without JSON parsing errors.
+	// Text pings MUST refresh the read deadline: gorilla only extends it on
+	// pong control frames, so without this every healthy app connection was
+	// killed at ~60s, causing endless reconnect churn and duplicate watchers.
+	if string(message) == "ping" || string(message) == "PING" {
+		_ = client.Conn.SetReadDeadline(time.Now().Add(pongWait))
 		return
 	}
 
@@ -445,7 +496,7 @@ func (m *Manager) HandleIncomingMessage(client *Client, message []byte) {
 			m.DeclineHandler.HandleDriverDecline(context.Background(), payload.RideID, client.ID)
 		}
 	case "PING":
-		// Ignore ping messages
+		// Ignore ping messages (deadline already refreshed above)
 	default:
 		logger.Log.Warn().Str("type", baseMsg.Type).Str("role", client.Role).Str("id", client.ID).Msg("Unknown event type")
 	}

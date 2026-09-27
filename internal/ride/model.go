@@ -104,6 +104,11 @@ type Ride struct {
 	EmergencyPriority int              `db:"emergency_priority" json:"emergency_priority"`
 	PaymentMode       string           `db:"payment_mode" json:"payment_mode"` // "cash" | "online"
 	PaymentID         *string          `db:"payment_id" json:"payment_id,omitempty"`
+	RegionID          *string          `db:"region_id" json:"region_id,omitempty"`
+	// OtpRequired is the resolved type+region OTP flag, computed per request.
+	// Transient: never stored, never scanned (db:"-" skips pgx struct mapping;
+	// all SQL uses explicit column lists).
+	OtpRequired *bool `db:"-" json:"otp_required,omitempty"`
 	Time              TimeLog          `db:"created_at" json:"time"`
 	DispatchMetadata  DispatchMetadata `db:"dispatch_candidates_searched" json:"dispatch_metadata"`
 	CancellationReason string          `db:"cancellation_reason" json:"cancellation_reason,omitempty"`
