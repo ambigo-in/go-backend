@@ -496,10 +496,18 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		PaymentMode string  `json:"payment_mode"`
 		DropLat     float64 `json:"drop_lat"`
 		DropLng     float64 `json:"drop_lng"`
+		// Nested GeoJSON drop {type, coordinates:[lng,lat]} sent by driver
+		// apps (old builds send only this). Flat fields win when present.
+		Drop struct {
+			Coordinates []float64 `json:"coordinates"`
+		} `json:"drop"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, "Invalid payload", http.StatusBadRequest)
 		return
+	}
+	if req.DropLat == 0 && req.DropLng == 0 && len(req.Drop.Coordinates) == 2 {
+		req.DropLng, req.DropLat = req.Drop.Coordinates[0], req.Drop.Coordinates[1]
 	}
 	if req.PaymentMode == "" {
 		req.PaymentMode = "cash"
@@ -558,6 +566,12 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	recalcSecs := 0
 	recalcPoly := ""
 	recalcReason := ""
+	// Locked estimate, kept for the receipt ("you were told X, you drove Y").
+	lockedTotal := finalAmount
+	lockedKm := 0.0
+	if rideData.Route != nil {
+		lockedKm = rideData.Route.DistanceKm
+	}
 	if rideData.AmbTypeID != nil && *rideData.AmbTypeID != "" && len(rideData.Pickup.Coordinates) == 2 && len(rideData.Drop.Coordinates) == 2 {
 		estimateKm := 0.0
 		if rideData.Route != nil {
@@ -677,7 +691,29 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		userAmount = 0
 	}
 
+	// Human-readable fare-change note for receipts ("price rose by X km").
+	extraKm := 0.0
+	fareNote := ""
+	if recalcFare != nil && recalcReason != "" && recalcReason != "fare_review" {
+		extraKm = recalcKm - lockedKm
+		if extraKm < 0 {
+			extraKm = 0
+		}
+		extraKm = payment.RoundRupees(extraKm*10) / 10 // 1 decimal
+		switch recalcReason {
+		case "drop_moved":
+			fareNote = fmt.Sprintf("Ended %.1f km past the planned drop", extraKm)
+		case "detour":
+			fareNote = fmt.Sprintf("Route was %.1f km longer than estimated", extraKm)
+		default:
+			fareNote = fmt.Sprintf("Adjusted for %.1f km extra travel", extraKm)
+		}
+	}
+
 	paymentDesc := fmt.Sprintf("Charges for ride to %s", req.DropAddress)
+	if fareNote != "" {
+		paymentDesc += " (" + fareNote + ")"
+	}
 	driverShare := lockedShare
 	pmt := &payment.Payment{
 		UserID:         rideData.UserID,
@@ -836,14 +872,18 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.EventBus.PublishEvent(eventbus.ChannelRideCompleted, eventbus.RideCompletedPayload{
-		RideID:      rideID,
-		DriverID:    driverID,
-		UserID:      rideData.UserID,
-		PaymentMode: req.PaymentMode,
-		FinalAmount: userAmount,
-		DriverShare: driverShare,
-		DropAddress: req.DropAddress,
-		RequestID:   reqID,
+		RideID:          rideID,
+		DriverID:        driverID,
+		UserID:          rideData.UserID,
+		PaymentMode:     req.PaymentMode,
+		FinalAmount:     userAmount,
+		DriverShare:     driverShare,
+		DropAddress:     req.DropAddress,
+		RequestID:       reqID,
+		EstimatedAmount: lockedTotal,
+		ExtraKm:         extraKm,
+		FareReason:      recalcReason,
+		FareNote:        fareNote,
 	})
 
 	// V20: Process referral ride completion
@@ -851,6 +891,22 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		go h.ReferralService.ProcessRideCompletion(context.Background(), rideData.UserID, driverID)
 	}
 
+	// Fare breakdown for the receipt (estimate vs actual).
+	breakup := map[string]interface{}{}
+	if src := fareToUpdate; src != nil {
+		breakup = map[string]interface{}{
+			"base_fare": src.BaseFare, "distance_fare": src.DistanceFare,
+			"emergency_surcharge": src.EmergencySurcharge, "night_surcharge": src.NightSurcharge,
+			"total": src.Total, "driver_share": src.DriverShare,
+		}
+	} else if rideData.Fare != nil {
+		f := rideData.Fare
+		breakup = map[string]interface{}{
+			"base_fare": f.BaseFare, "distance_fare": f.DistanceFare,
+			"emergency_surcharge": f.EmergencySurcharge, "night_surcharge": f.NightSurcharge,
+			"total": f.Total, "driver_share": f.DriverShare,
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"detail":            "Ride Completed",
@@ -858,6 +914,13 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		"razorpay_order_id": pmt.RazorpayOrderID,
 		"take_cash":         req.PaymentMode != "online",
 		"amount":            userAmount,
+		"estimated_amount":  lockedTotal,
+		"estimated_km":      lockedKm,
+		"actual_km":         recalcKm,
+		"extra_km":          extraKm,
+		"fare_reason":       recalcReason,
+		"fare_note":         fareNote,
+		"fare_breakup":      breakup,
 	})
 }
 

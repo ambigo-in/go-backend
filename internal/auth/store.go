@@ -566,7 +566,7 @@ func (s *Store) SetSessionFCMToken(ctx context.Context, userID, sessionID, fcmTo
 // that were killed by a newer login (revoked with reason session_replaced),
 // excluding the just-created session. Used for the FCM kill-switch push.
 func (s *Store) ListSupersededSessionFCMTokens(ctx context.Context, userID, exceptSessionID string) ([]string, error) {
-	rows, err := s.pool.Query(ctx, `SELECT DISTINCT fcm_token FROM refresh_tokens WHERE user_id=$1 AND revoked=true AND revoked_reason='session_replaced' AND fcm_token IS NOT NULL AND fcm_token<>'' AND (session_id IS DISTINCT FROM $2)`, userID, exceptSessionID)
+	rows, err := s.pool.Query(ctx, `SELECT DISTINCT fcm_token FROM refresh_tokens WHERE user_id=$1 AND revoked=true AND revoked_reason='session_replaced' AND fcm_token IS NOT NULL AND fcm_token<>'' AND (session_id IS DISTINCT FROM $2) AND fcm_token NOT IN (SELECT fcm_token FROM refresh_tokens WHERE user_id=$1 AND revoked=false AND fcm_token IS NOT NULL AND fcm_token<>'')`, userID, exceptSessionID)
 	if err != nil {
 		return nil, err
 	}

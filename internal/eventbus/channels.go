@@ -108,6 +108,11 @@ type RideCompletedPayload struct {
 	DriverShare float64 `json:"driver_share"`
 	DropAddress string  `json:"drop_address"`
 	RequestID   string  `json:"request_id,omitempty"`
+	// Fare-change transparency ("your price rose by X km").
+	EstimatedAmount float64 `json:"estimated_amount,omitempty"`
+	ExtraKm         float64 `json:"extra_km,omitempty"`
+	FareReason      string  `json:"fare_reason,omitempty"`
+	FareNote        string  `json:"fare_note,omitempty"`
 }
 
 // RideCancelledPayload is published when a ride is cancelled

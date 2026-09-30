@@ -77,7 +77,10 @@ func (s *Store) ListTrail(ctx context.Context, rideID string) ([]TrailPoint, err
 }
 
 // TrailDistanceKm sums filtered haversine segments: drops <10m jitter and
-// >150km/h jumps (tunnel exit / spoof).
+// impossible jumps (tunnel exit / spoof). Sub-5s bursts (backfills, same-
+// second fixes) skip the strict cap — their tiny dt would otherwise read as
+// teleportation and drop legitimate fast segments; a lenient 300km/h cap
+// still catches spoof jumps.
 func TrailDistanceKm(points []TrailPoint) float64 {
 	if len(points) < 2 {
 		return 0
@@ -89,9 +92,13 @@ func TrailDistanceKm(points []TrailPoint) float64 {
 		if segM < TrailMinMoveM {
 			continue
 		}
-		dt := cur.RecordedAt.Sub(prev.RecordedAt).Hours()
-		if dt > 0 {
-			if segM/1000.0/dt > TrailMaxSpeedKmh {
+		dtSec := cur.RecordedAt.Sub(prev.RecordedAt).Seconds()
+		// Sub-2s bursts (backfills, same-second fixes, 3s pings under load):
+		// dt is too small for a meaningful speed, so only the jitter
+		// filter applies. Systematic inflation is still caught by the
+		// trip-level fraud cap (ExceedsCap: trail > estimate*2 + 15km).
+		if dtSec >= 2 {
+			if segM/1000.0/(dtSec/3600.0) > float64(TrailMaxSpeedKmh) {
 				continue
 			}
 		}
