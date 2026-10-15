@@ -8,7 +8,11 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const accessTokenExpiry = 15 * time.Minute
+// AccessTokenExpiry is the user/driver/attendant access-token lifetime.
+// Default 15 minutes (production). Load-test backends override it via the
+// JWT_VALIDITY_MS env (wired in cmd/server/main.go) so long suites never
+// outlive their tokens mid-run.
+var AccessTokenExpiry = 15 * time.Minute
 
 type Claims struct {
 	ID         string `json:"_id"`
@@ -43,7 +47,7 @@ func GenerateAccessToken(id string, role string, secret string) (string, error) 
 		ID:   id,
 		Role: role,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(accessTokenExpiry)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(AccessTokenExpiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}
@@ -72,7 +76,7 @@ func GenerateHospitalAccessToken(id, role, hospitalID, secret string) (string, e
 		Role:       role,
 		HospitalID: hospitalID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(accessTokenExpiry)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(AccessTokenExpiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 		},
 	}

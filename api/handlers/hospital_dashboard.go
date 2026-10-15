@@ -11,6 +11,7 @@ import (
 	"ambigo-backend/api/response"
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
+	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/ride"
 	"ambigo-backend/internal/websocket"
 
@@ -23,15 +24,17 @@ type HospitalDashboardHandler struct {
 	AdminStore    *admin.Store
 	AuthStore     *auth.Store
 	WSManager     *websocket.Manager
+	EventBus      *eventbus.InMemoryBus
 }
 
-func NewHospitalDashboardHandler(rideStore *ride.Store, hospitalStore *admin.HospitalStore, adminStore *admin.Store, authStore *auth.Store, wsManager *websocket.Manager) *HospitalDashboardHandler {
+func NewHospitalDashboardHandler(rideStore *ride.Store, hospitalStore *admin.HospitalStore, adminStore *admin.Store, authStore *auth.Store, wsManager *websocket.Manager, bus *eventbus.InMemoryBus) *HospitalDashboardHandler {
 	return &HospitalDashboardHandler{
 		RideStore:     rideStore,
 		HospitalStore: hospitalStore,
 		AdminStore:    adminStore,
 		AuthStore:     authStore,
 		WSManager:     wsManager,
+		EventBus:      bus,
 	}
 }
 
@@ -585,4 +588,222 @@ func (h *HospitalDashboardHandler) HandleAcknowledgeRide(w http.ResponseWriter, 
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(rd)
+}
+
+// declineRerouteRadiusKm bounds the auto-reroute search around the driver's
+// live position (mid-ride). FindNearby covers ~25-30km via H3 ring-2.
+const declineRerouteRadiusKm = 30.0
+
+// hospitalAddressDisplay returns the en_US address, falling back to any locale.
+func hospitalAddressDisplay(addr map[string]string) string {
+	if addr == nil {
+		return ""
+	}
+	if s := strings.TrimSpace(addr["en_US"]); s != "" {
+		return s
+	}
+	for _, s := range addr {
+		if strings.TrimSpace(s) != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+// HandleDeclineRide declines a mid-ride inbound patient and immediately
+// reroutes the ride to the nearest other hospital (auto-nearest), then
+// notifies the driver of the changed destination via WS.
+// Contract (agreed with portal):
+//   POST /api/v2/hospital/rides/decline {ride_id, reason?}
+//   200 {detail, ride_id, from_hospital_id, to_hospital_id, to_hospital_name, drop_address}
+//   409 "No nearby hospital available ..." -> portal keeps the ride ringing.
+// Only SEARCHING/ASSIGNED/ARRIVED/IN_PROGRESS rides can be declined;
+// COMPLETED/CANCELLED are terminal (409). Cross-hospital writes are 403.
+func (h *HospitalDashboardHandler) HandleDeclineRide(w http.ResponseWriter, r *http.Request) {
+	hid, ok := hospitalIDFromContext(r)
+	if !ok {
+		response.Error(w, "Hospital not linked", http.StatusBadRequest)
+		return
+	}
+	userID, _ := r.Context().Value(middleware.UserIDKey).(string)
+	var req struct {
+		RideID string `json:"ride_id"`
+		Reason string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.RideID == "" {
+		response.Error(w, "ride_id required", http.StatusBadRequest)
+		return
+	}
+	if !ids.IsValid(req.RideID) {
+		response.Error(w, "Invalid ride_id", http.StatusBadRequest)
+		return
+	}
+	rideDoc, err := h.RideStore.GetRideByID(r.Context(), req.RideID)
+	if err != nil || rideDoc == nil {
+		response.Error(w, "Ride not found", http.StatusNotFound)
+		return
+	}
+	if rideDoc.HospitalID == nil || *rideDoc.HospitalID != hid {
+		response.Error(w, "Forbidden: different hospital", http.StatusForbidden)
+		return
+	}
+	switch rideDoc.Status {
+	case ride.StatusSearching, ride.StatusAssigned, ride.StatusArrived, ride.StatusInProgress:
+		// declinable
+	default:
+		response.Error(w, "Ride already "+string(rideDoc.Status)+" — cannot decline", http.StatusConflict)
+		return
+	}
+
+	// Origin = live driver position (mid-ride), fallback to pickup.
+	var lng, lat float64
+	var haveOrigin bool
+	if rideDoc.DriverID != nil && *rideDoc.DriverID != "" && h.WSManager != nil && h.WSManager.LocStore != nil {
+		if la, ln, err := h.WSManager.LocStore.GetLocation(*rideDoc.DriverID); err == nil {
+			lat, lng, haveOrigin = la, ln, true
+		}
+	}
+	if !haveOrigin && len(rideDoc.Pickup.Coordinates) == 2 {
+		lng, lat, haveOrigin = rideDoc.Pickup.Coordinates[0], rideDoc.Pickup.Coordinates[1], true
+	}
+	if !haveOrigin {
+		response.Error(w, "Cannot locate ride for reroute — ride stays with you", http.StatusConflict)
+		return
+	}
+
+	// Nearest-first candidates, excluding the declining desk. Prefer
+	// always-open hospitals first so the patient never lands on a closed desk.
+	candidates, err := h.HospitalStore.FindNearby(r.Context(), lng, lat, declineRerouteRadiusKm)
+	if err != nil {
+		response.Error(w, "Failed to search nearby hospitals", http.StatusInternalServerError)
+		return
+	}
+	var target *admin.Hospital
+	for i := range candidates {
+		if candidates[i].ID == hid {
+			continue
+		}
+		if candidates[i].AlwaysOpen {
+			target = &candidates[i]
+			break
+		}
+	}
+	if target == nil {
+		for i := range candidates {
+			if candidates[i].ID == hid {
+				continue
+			}
+			target = &candidates[i]
+			break
+		}
+	}
+	if target == nil {
+		response.Error(w, "No nearby hospital available — ride stays with you", http.StatusConflict)
+		return
+	}
+	targetHosp, err := h.HospitalStore.FindByID(r.Context(), target.ID)
+	if err != nil || targetHosp == nil || len(targetHosp.Location.Coordinates) != 2 {
+		response.Error(w, "Reroute target unavailable — ride stays with you", http.StatusConflict)
+		return
+	}
+
+	newDropAddr := hospitalAddressDisplay(targetHosp.Address)
+	if newDropAddr == "" {
+		newDropAddr = admin.HospitalDisplayName(targetHosp.Name)
+	}
+	newDrop := ride.GeoJSONPoint{Type: "Point", Coordinates: append([]float64(nil), targetHosp.Location.Coordinates...)}
+
+	// Atomic move guarded by expected current hospital (no double-move).
+	if err := h.RideStore.ReassignRideHospital(r.Context(), rideDoc.ID, hid, targetHosp.ID, newDrop, newDropAddr); err != nil {
+		response.Error(w, "Ride already moved — refreshing", http.StatusConflict)
+		return
+	}
+	// Audit + clear stale ack (non-fatal: reroute already committed).
+	_, _ = h.RideStore.RecordDecline(r.Context(), rideDoc.ID, hid, &targetHosp.ID, userID, req.Reason)
+	_ = h.RideStore.DeleteReadiness(r.Context(), rideDoc.ID)
+
+	targetName := admin.HospitalDisplayName(targetHosp.Name)
+	newLat := targetHosp.Location.Coordinates[1]
+	newLng := targetHosp.Location.Coordinates[0]
+	driverID := ""
+	if rideDoc.DriverID != nil {
+		driverID = *rideDoc.DriverID
+	}
+
+	// Full destination payload: the user app applies it directly, no
+	// detail re-fetch needed to show the new hospital + address.
+	fullDest := map[string]interface{}{
+		"ride_id":          rideDoc.ID,
+		"hospital_id":      targetHosp.ID,
+		"hospital_name":    targetName,
+		"drop":             newDrop,
+		"drop_address":     newDropAddr,
+		"drop_lat":         newLat,
+		"drop_lng":         newLng,
+		"lat":              newLat,
+		"lng":              newLng,
+		"status":           string(rideDoc.Status),
+		"from_hospital_id": hid,
+	}
+
+	// Notify driver of the changed destination (direct push).
+	if driverID != "" && h.WSManager != nil {
+		h.WSManager.SendToClient("driver", driverID, websocket.EventDestinationChanged, fullDest)
+	}
+	// Notify the riding user directly with the FULL payload (foreground:
+	// instant screen update, no re-fetch). Background delivery is via FCM
+	// below (eventbus), since WS can't reach a killed app.
+	if h.WSManager != nil {
+		h.WSManager.SendToClient("user", rideDoc.UserID, websocket.EventDestinationChanged, fullDest)
+	}
+	if h.WSManager != nil {
+		// Old desk: drop instantly instead of waiting for the 10s poll.
+		h.WSManager.SendToRideWatchers(rideDoc.ID, websocket.EventRideReassignedAway, map[string]interface{}{
+			"ride_id":          rideDoc.ID,
+			"from_hospital_id": hid,
+			"to_hospital_id":   targetHosp.ID,
+			"to_hospital_name": targetName,
+		})
+		// New desk + watchers: full payload so screens update in place.
+		// (Older clients that only read ride_id/status/hospital_id ignore
+		// the extra keys and fall back to their existing reload path.)
+		h.WSManager.SendToRideWatchers(rideDoc.ID, websocket.EventRideUpdate, fullDest)
+		h.WSManager.SendToRideWatchers(rideDoc.ID, websocket.EventNewIncoming, map[string]interface{}{
+			"ride_id":     rideDoc.ID,
+			"hospital_id": targetHosp.ID,
+		})
+		h.WSManager.BroadcastToRole("admin", websocket.EventRideUpdate, map[string]interface{}{
+			"ride_id":          rideDoc.ID,
+			"status":           string(rideDoc.Status),
+			"from_hospital_id": hid,
+			"to_hospital_id":   targetHosp.ID,
+		})
+	}
+
+	// FCM for background/killed user app (non-fatal: WS above already
+	// covers the foreground case).
+	if h.EventBus != nil {
+		_ = h.EventBus.PublishEvent(eventbus.ChannelRideDestinationChanged, eventbus.RideDestinationChangedPayload{
+			RideID:       rideDoc.ID,
+			UserID:       rideDoc.UserID,
+			DriverID:     driverID,
+			HospitalID:   targetHosp.ID,
+			HospitalName: targetName,
+			DropLat:      newLat,
+			DropLng:      newLng,
+			DropAddress:  newDropAddr,
+			FromHospital: hid,
+			Status:       string(rideDoc.Status),
+		})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"detail":           "Declined — rerouted to nearest hospital. Driver notified.",
+		"ride_id":          rideDoc.ID,
+		"from_hospital_id": hid,
+		"to_hospital_id":   targetHosp.ID,
+		"to_hospital_name": targetName,
+		"drop_address":     newDropAddr,
+	})
 }

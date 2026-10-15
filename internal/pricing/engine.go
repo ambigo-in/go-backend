@@ -11,6 +11,9 @@ type PricingTier struct {
 }
 
 type Engine struct {
+	// Kept as construction-time defaults; per-request values come from
+	// pricing_settings via SettingsStore and are passed explicitly to the
+	// Calculate* methods below.
 	EmergencyMultiplier float64
 	NightMultiplier     float64
 }
@@ -50,20 +53,29 @@ func (e *Engine) CalculateBaseAndDistanceFare(distanceKm float64, baseFare float
 	return totalCost + baseFare
 }
 
-// CalculateEmergencySurcharge applies an extra fee if it's an SOS/Emergency
-func (e *Engine) CalculateEmergencySurcharge(baseCost float64, isSOS bool) float64 {
+// CalculateEmergencySurcharge applies an extra fee if it's an SOS/Emergency.
+// mult is the engine multiplier (1.5 = +50%); resolved per request from
+// pricing_settings so admins can configure it without a deploy.
+func (e *Engine) CalculateEmergencySurcharge(baseCost float64, isSOS bool, mult float64) float64 {
 	if !isSOS {
 		return 0.0
 	}
-	return baseCost * (e.EmergencyMultiplier - 1.0)
+	if mult < 1.0 {
+		mult = 1.0
+	}
+	return baseCost * (mult - 1.0)
 }
 
-// CalculateNightSurcharge applies an extra fee if it's currently night time (10 PM to 5 AM)
-func (e *Engine) CalculateNightSurcharge(baseCost float64, currentTime time.Time) float64 {
+// CalculateNightSurcharge applies an extra fee if it's currently night time
+// (10 PM to 5 AM). mult is the engine multiplier (1.2 = +20%).
+func (e *Engine) CalculateNightSurcharge(baseCost float64, currentTime time.Time, mult float64) float64 {
 	hour := currentTime.Hour()
 	// Between 10 PM (22) and 5 AM (5)
 	if hour >= 22 || hour < 5 {
-		return baseCost * (e.NightMultiplier - 1.0)
+		if mult < 1.0 {
+			mult = 1.0
+		}
+		return baseCost * (mult - 1.0)
 	}
 	return 0.0
 }

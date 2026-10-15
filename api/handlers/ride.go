@@ -39,9 +39,10 @@ type RideHandler struct {
 	WalletStore     *payment.WalletStore
 	ReferralService *referral.Service
 	RegionStore     *pricing.RegionStore
+	SettingsStore   *pricing.SettingsStore
 }
 
-func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemoryBus, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore, referralService *referral.Service, regionStore *pricing.RegionStore) *RideHandler {
+func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemoryBus, paymentStore *payment.Store, rzp *payment.RazorpayService, authStore *auth.Store, adminStore *admin.Store, routeClient *dispatch.RouteClient, walletStore *payment.WalletStore, referralService *referral.Service, regionStore *pricing.RegionStore, settingsStore *pricing.SettingsStore) *RideHandler {
 	return &RideHandler{
 		Dispatcher:      dispatcher,
 		EventBus:        eventBus,
@@ -54,7 +55,18 @@ func NewRideHandler(dispatcher *dispatch.Dispatcher, eventBus *eventbus.InMemory
 		WalletStore:     walletStore,
 		ReferralService: referralService,
 		RegionStore:     regionStore,
+		SettingsStore:   settingsStore,
 	}
+}
+
+// surcharges resolves the admin-configured SOS/night multipliers for one fare
+// computation. Falls back to the built-in defaults (1.5x / 1.2x) when the
+// settings store is unavailable — fare computation must never block on it.
+func (h *RideHandler) surcharges(ctx context.Context) (emgMult, nightMult float64) {
+	if h.SettingsStore == nil {
+		return 1.5, 1.2
+	}
+	return h.SettingsStore.Get(ctx).Multipliers()
 }
 
 // effectivePrice resolves V2 H3 region override for a pickup, falling back to global.
@@ -282,8 +294,9 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 
 			// Calculate Total Fare
 			base := h.PricingEngine.CalculateBaseAndDistanceFare(distanceKm, effBase, pricingTiers)
-			emergency := h.PricingEngine.CalculateEmergencySurcharge(base, newRide.EmergencyPriority > 0)
-			night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
+			emgMult, nightMult := h.surcharges(r.Context())
+			emergency := h.PricingEngine.CalculateEmergencySurcharge(base, newRide.EmergencyPriority > 0, emgMult)
+			night := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
 			totalAmount := base + emergency + night
 			totalAmount = payment.RoundRupees(totalAmount)
 
@@ -551,8 +564,9 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			}
 
 			base := h.PricingEngine.CalculateBaseAndDistanceFare(distanceKm, ambType.BaseFare, pricingTiers)
-			emergency := h.PricingEngine.CalculateEmergencySurcharge(base, rideData.EmergencyPriority > 0)
-			night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
+			emgMult, nightMult := h.surcharges(r.Context())
+			emergency := h.PricingEngine.CalculateEmergencySurcharge(base, rideData.EmergencyPriority > 0, emgMult)
+			night := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
 			finalAmount = base + emergency + night
 			finalAmount = payment.RoundRupees(finalAmount)
 			lockedShare = payment.RoundRupees(finalAmount * ambType.DriverShare / 100.0)
@@ -639,8 +653,9 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					base := h.PricingEngine.CalculateBaseAndDistanceFare(billKm, effBase, tiers)
-					emg := h.PricingEngine.CalculateEmergencySurcharge(base, rideData.EmergencyPriority > 0)
-					ngt := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
+					emgMult, nightMult := h.surcharges(r.Context())
+					emg := h.PricingEngine.CalculateEmergencySurcharge(base, rideData.EmergencyPriority > 0, emgMult)
+					ngt := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
 					total := payment.RoundRupees(base + emg + ngt)
 					share := payment.RoundRupees(total * effShare / 100.0)
 					if total > 0 {
@@ -1238,8 +1253,9 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		effBase, pricingTiers, effShare, regionID := h.effectivePrice(r.Context(), req.PickupLat, req.PickupLng, ambType)
 
 		base := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, effBase, pricingTiers)
-		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS)
-		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
+		emgMult, nightMult := h.surcharges(r.Context())
+		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS, emgMult)
+		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
 		total := payment.RoundRupees(base+emergency+night)
 
 		driverShare := payment.RoundRupees(total * effShare / 100.0)
@@ -1285,8 +1301,9 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		effBase, pricingTiers, effShare, _ := h.effectivePrice(r.Context(), req.PickupLat, req.PickupLng, &ambType)
 
 		base := h.PricingEngine.CalculateBaseAndDistanceFare(req.DistanceKm, effBase, pricingTiers)
-		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS)
-		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now())
+		emgMult, nightMult := h.surcharges(r.Context())
+		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS, emgMult)
+		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
 		total := payment.RoundRupees(base+emergency+night)
 
 		driverShare := payment.RoundRupees(total * effShare / 100.0)

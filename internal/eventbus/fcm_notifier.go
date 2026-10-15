@@ -32,6 +32,7 @@ const fcmWorkerPoolSize = 10
 
 func (n *FCMNotifier) SubscribeTo(bus *InMemoryBus) {
 	n.subscribeWithPool(bus, ChannelRideDriverOffered, n.handleRideOffered)
+	n.subscribeWithPool(bus, ChannelRideWithdrawn, n.handleRideWithdrawn)
 	n.subscribeWithPool(bus, ChannelRideAccepted, n.handleRideAccepted)
 	n.subscribeWithPool(bus, ChannelRideArrived, n.handleRideArrived)
 	n.subscribeWithPool(bus, ChannelRideStarted, n.handleRideStarted)
@@ -42,6 +43,7 @@ func (n *FCMNotifier) SubscribeTo(bus *InMemoryBus) {
 	n.subscribeWithPool(bus, ChannelAuthSessionReplaced, n.handleSessionReplaced)
 	n.subscribeWithPool(bus, ChannelSafetyStoppedWarn, n.handleSafetyStoppedWarn)
 	n.subscribeWithPool(bus, ChannelSafetyStoppedAlarm, n.handleSafetyStoppedAlarm)
+	n.subscribeWithPool(bus, ChannelRideDestinationChanged, n.handleRideDestinationChanged)
 }
 
 // subscribeWithPool creates a single shared channel via SubscribeWithChan and
@@ -131,6 +133,35 @@ func (n *FCMNotifier) handleRideOffered(payload []byte) {
 
 	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
 		ll.Error().Err(err).Str("driver_id", p.DriverID).Msg("FCM push failed for driver")
+	}
+}
+
+// handleRideWithdrawn tells a broadcast loser (background/killed app) that
+// the ride was won by someone else.
+func (n *FCMNotifier) handleRideWithdrawn(payload []byte) {
+	var p RideWithdrawnPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "ride:withdrawn").Msg("Unmarshal error")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	token, err := n.authStore.GetDriverFCMToken(ctx, p.DriverID)
+	if err != nil {
+		logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Failed to get FCM token for withdraw")
+		return
+	}
+	if token == nil || *token == "" {
+		return
+	}
+	data := map[string]string{
+		"type":    "RIDE_WITHDRAWN",
+		"ride_id": p.RideID,
+		"title":   "Ride taken",
+	}
+	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+		logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("FCM withdraw failed")
 	}
 }
 
@@ -228,6 +259,63 @@ func (n *FCMNotifier) handleRideStarted(payload []byte) {
 
 	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Ride started FCM push failed for user")
+	}
+}
+
+// handleRideDestinationChanged pushes the user when a hospital desk declines
+// a mid-ride patient and the ride is rerouted. Full destination included so
+// the app updates without a re-fetch — and this reaches background/killed
+// apps where WS cannot.
+func (n *FCMNotifier) handleRideDestinationChanged(payload []byte) {
+	var p RideDestinationChangedPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "ride:destination_changed").Msg("Unmarshal error")
+		return
+	}
+
+	if p.UserID == "" {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	token, err := n.authStore.GetUserFCMToken(ctx, p.UserID)
+	if err != nil || token == nil || *token == "" {
+		return
+	}
+
+	body := "Your ambulance is now heading to another hospital."
+	if p.HospitalName != "" {
+		body = "Your ambulance is now heading to " + p.HospitalName + "."
+	}
+	data := map[string]string{
+		"type":           "DESTINATION_CHANGED",
+		"ride_id":        p.RideID,
+		"hospital_id":    p.HospitalID,
+		"hospital_name":  p.HospitalName,
+		"drop_lat":       fmt.Sprintf("%f", p.DropLat),
+		"drop_lng":       fmt.Sprintf("%f", p.DropLng),
+		"drop_address":   p.DropAddress,
+		"title":          "Destination changed",
+		"body":           body,
+	}
+
+	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Destination changed FCM push failed for user")
+	}
+
+	// Same reroute must reach a backgrounded/killed driver app: the live
+	// WS only covers the foreground ride screens.
+	if p.DriverID == "" {
+		return
+	}
+	dToken, dErr := n.authStore.GetDriverFCMToken(ctx, p.DriverID)
+	if dErr != nil || dToken == nil || *dToken == "" {
+		return
+	}
+	if err := n.fcmClient.SendDataMessage(ctx, *dToken, data); err != nil {
+		logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Destination changed FCM push failed for driver")
 	}
 }
 

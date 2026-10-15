@@ -8,8 +8,11 @@ import (
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	"ambigo-backend/internal/mailer"
 
@@ -58,6 +61,19 @@ func main() {
 
 	// 1. Load Configuration
 	appConfig := config.LoadConfig()
+
+	// Load-test override: longer-lived access tokens so multi-hour suites
+	// never outlive their mint (e.g. JWT_VALIDITY_MS=8h). Production default
+	// stays 15 minutes when unset.
+	if v := os.Getenv("JWT_VALIDITY_MS"); v != "" {
+		if ms, err := strconv.Atoi(v); err == nil && ms > 0 {
+			auth.AccessTokenExpiry = time.Duration(ms) * time.Millisecond
+			log.Info().Dur("access_token_expiry", auth.AccessTokenExpiry).Msg("JWT validity override active")
+		} else if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			auth.AccessTokenExpiry = d
+			log.Info().Dur("access_token_expiry", auth.AccessTokenExpiry).Msg("JWT validity override active")
+		}
+	}
 
 	// 2. Initialize PostgreSQL (primary) — replaces MongoDB
 	pgCfg := config.PostgresConfig{
@@ -149,8 +165,9 @@ func main() {
 
 	// Initialize Handlers
 	regionStore := pricing.NewRegionStore(pool)
-	rideHandler := handlers.NewRideHandler(dispatcher, eventBus, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore, referralService, regionStore)
-	regionHandler := handlers.NewRegionHandler(regionStore)
+	settingsStore := pricing.NewSettingsStore(pool)
+	rideHandler := handlers.NewRideHandler(dispatcher, eventBus, paymentStore, rzpService, authStore, adminStore, routeClient, walletStore, referralService, regionStore, settingsStore)
+	regionHandler := handlers.NewRegionHandler(regionStore, settingsStore)
 	smsCfg := auth.SMSCountryConfig{
 		APIKey:     os.Getenv("SMS_COUNTRY_KEY"),
 		APIToken:   os.Getenv("SMS_COUNTRY_TOKEN"),
@@ -176,7 +193,7 @@ func main() {
 	receptionistHandler := handlers.NewHospitalReceptionistHandler(authStore, appConfig.JWTSecret, resendMailer)
 	attendantAuthHandler := handlers.NewAttendantAuthHandler(authStore, appConfig.JWTSecret, smsCfg, eventBus)
 	driverAttendantHandler := handlers.NewDriverAttendantHandler(authStore)
-	hospitalDashboardHandler := handlers.NewHospitalDashboardHandler(rideStore, hospitalStore, adminStore, authStore, wsManager)
+	hospitalDashboardHandler := handlers.NewHospitalDashboardHandler(rideStore, hospitalStore, adminStore, authStore, wsManager, eventBus)
 	offerHandler := handlers.NewOfferHandler(offerStore, eventBus)
 	sharedHandler := handlers.NewSharedHandler(cloudshopeService, counterStore, adminStore, hospitalStore, hospitalSeeder)
 	sharedHandler.SetAppConfig(appConfig.WithdrawalFee, 30)
@@ -228,10 +245,27 @@ func main() {
 	}
 
 	// Rate limiters
-	otpIPLimiter := middleware.NewIPLimiter(3, 5)                     // V1: IP-based for OTP request
-	verifyMobileLimiter := middleware.NewMobileRateLimiter(3, 5)      // V1: mobile-based for OTP verify
-	adminLoginLimiter := middleware.NewIPLimiter(5, 10)               // V7: IP-based for admin login
-	globalRateLimiter := middleware.NewIPLimiter(100, 200)            // A5: Global per-IP limit for all authenticated routes
+	otpIPLimiter := middleware.NewIPLimiter(3, 5)                // V1: IP-based for OTP request
+	verifyMobileLimiter := middleware.NewMobileRateLimiter(3, 5) // V1: mobile-based for OTP verify
+	adminLoginLimiter := middleware.NewIPLimiter(5, 10)          // V7: IP-based for admin login
+	// A5: Global per-IP limit for all authenticated routes. Load-test
+	// override via GLOBAL_RPS_LIMIT / GLOBAL_RPS_BURST (single-IP k6 would
+	// otherwise measure the limiter, not capacity). Production default 100/200.
+	globalRPS, globalBurst := 100, 200
+	if v := os.Getenv("GLOBAL_RPS_LIMIT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			globalRPS = n
+		}
+	}
+	if v := os.Getenv("GLOBAL_RPS_BURST"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			globalBurst = n
+		}
+	}
+	globalRateLimiter := middleware.NewIPLimiter(rate.Limit(globalRPS), globalBurst)
+	if globalRPS != 100 || globalBurst != 200 {
+		log.Info().Int("rps", globalRPS).Int("burst", globalBurst).Msg("Global rate limiter override active")
+	}
 
 	mux := http.NewServeMux()
 
@@ -418,6 +452,9 @@ func main() {
 	mux.Handle("DELETE /api/v2/admin/regions/{id}", requireAdmin(http.HandlerFunc(regionHandler.HandleDeleteRegion)))
 	mux.Handle("POST /api/v2/admin/regions/prices", requireAdmin(http.HandlerFunc(regionHandler.HandleUpsertRegionPrice)))
 	mux.Handle("GET /api/v2/admin/regions/price", requireAdmin(http.HandlerFunc(regionHandler.HandleGetRegionPrice)))
+	// Global surcharge settings (SOS % + night %)
+	mux.Handle("GET /api/v2/admin/pricing/settings", requireAdmin(http.HandlerFunc(regionHandler.HandleGetSurchargeSettings)))
+	mux.Handle("POST /api/v2/admin/pricing/settings", requireAdmin(http.HandlerFunc(regionHandler.HandleUpsertSurchargeSettings)))
 	// Admin: Verified Driver CRUD
 	mux.Handle("POST /api/v2/admin/drivers/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListDrivers)))
 	mux.Handle("POST /api/v2/admin/drivers/details", requireAdmin(http.HandlerFunc(adminHandler.HandleGetDriverDetails)))
@@ -493,6 +530,7 @@ func main() {
 	mux.Handle("POST /api/v2/hospital/rides/history", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalHistory)))
 	mux.Handle("POST /api/v2/hospital/rides/detail", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalRideDetail)))
 	mux.Handle("POST /api/v2/hospital/rides/acknowledge", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleAcknowledgeRide)))
+	mux.Handle("POST /api/v2/hospital/rides/decline", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleDeclineRide)))
 	mux.Handle("POST /api/v2/hospital/profile", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalProfile)))
 	mux.Handle("POST /api/v2/hospital/profile/update", requireHospitalMD(http.HandlerFunc(hospitalDashboardHandler.HandleUpdateHospitalProfile)))
 	mux.Handle("POST /api/v2/hospital/analytics", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalAnalytics)))

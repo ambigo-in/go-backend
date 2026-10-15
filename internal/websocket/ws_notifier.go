@@ -18,6 +18,7 @@ func NewWSNotifier(wsManager *Manager) *WSNotifier {
 
 func (n *WSNotifier) SubscribeTo(bus *eventbus.InMemoryBus) {
 	bus.Subscribe(eventbus.ChannelRideDriverOffered, n.handleRideDriverOffered)
+	bus.Subscribe(eventbus.ChannelRideWithdrawn, n.handleRideWithdrawn)
 	bus.Subscribe(eventbus.ChannelRideAccepted, n.handleRideAccepted)
 	bus.Subscribe(eventbus.ChannelRideArrived, n.handleRideStatusChanged)
 	bus.Subscribe(eventbus.ChannelRideStarted, n.handleRideStatusChanged)
@@ -71,6 +72,18 @@ func (n *WSNotifier) handleRideDriverOffered(payload []byte) {
 		"offer_expires_in":      p.OfferExpiresIn,
 	}
 	n.wsManager.SendToClient("driver", p.DriverID, EventRideRequested, msg)
+}
+
+func (n *WSNotifier) handleRideWithdrawn(payload []byte) {
+	var p eventbus.RideWithdrawnPayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "ride:withdrawn").Msg("Unmarshal error")
+		return
+	}
+	msg := map[string]interface{}{
+		"ride_id": p.RideID,
+	}
+	n.wsManager.SendToClient("driver", p.DriverID, "RIDE_WITHDRAWN", msg)
 }
 
 func (n *WSNotifier) handleRideAccepted(payload []byte) {

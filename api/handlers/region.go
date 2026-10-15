@@ -9,11 +9,12 @@ import (
 )
 
 type RegionHandler struct {
-	Regions *pricing.RegionStore
+	Regions  *pricing.RegionStore
+	Settings *pricing.SettingsStore
 }
 
-func NewRegionHandler(rs *pricing.RegionStore) *RegionHandler {
-	return &RegionHandler{Regions: rs}
+func NewRegionHandler(rs *pricing.RegionStore, ss *pricing.SettingsStore) *RegionHandler {
+	return &RegionHandler{Regions: rs, Settings: ss}
 }
 
 func (h *RegionHandler) HandleListRegions(w http.ResponseWriter, r *http.Request) {
@@ -177,4 +178,29 @@ func (h *RegionHandler) HandleGetRegionPrice(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	response.Success(w, http.StatusOK, p)
+}
+
+// HandleGetSurchargeSettings returns the global SOS/night percent-extra
+// settings (single row). Always succeeds — falls back to built-in defaults.
+func (h *RegionHandler) HandleGetSurchargeSettings(w http.ResponseWriter, r *http.Request) {
+	response.Success(w, http.StatusOK, h.Settings.Get(r.Context()))
+}
+
+// HandleUpsertSurchargeSettings saves the global SOS/night percent-extra
+// settings. Percent input: 50 = +50% (1.5x multiplier).
+func (h *RegionHandler) HandleUpsertSurchargeSettings(w http.ResponseWriter, r *http.Request) {
+	var req pricing.SurchargeSettings
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
+		return
+	}
+	out, err := h.Settings.Upsert(r.Context(), req.EmergencyPct, req.NightPct)
+	if err != nil {
+		response.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	response.Success(w, http.StatusOK, out)
 }

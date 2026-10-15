@@ -12,6 +12,10 @@ const (
 	EventRideDeclined   = "RIDE_DECLINED"
 	EventSOSAlert       = "SOS_ALERT"
 	EventError          = "ERROR"
+	// Hospital decline auto-reroute (mid-ride destination change).
+	EventDestinationChanged = "DESTINATION_CHANGED"
+	EventRideReassignedAway = "RIDE_REASSIGNED_AWAY"
+	EventNewIncoming        = "NEW_INCOMING"
 )
 
 // BaseMessage is the generic envelope for all websocket communications
