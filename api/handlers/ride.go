@@ -1090,6 +1090,69 @@ func (h *RideHandler) HandleGetCurrentRide(w http.ResponseWriter, r *http.Reques
 	})
 }
 
+// HandleGetRecentCompletedRide returns the user's most recent COMPLETED ride
+// (if any) along with its payment amount, so the app can show a receipt after
+// reopening from background when the ride is no longer "current".
+func (h *RideHandler) HandleGetRecentCompletedRide(w http.ResponseWriter, r *http.Request) {
+	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role, ok := r.Context().Value(middleware.UserRoleKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role = h.upgradeUnvrfDriverRole(uidStr, role)
+
+	// Get the user's most recent ride (ordered by created_at DESC).
+	rides, err := h.Dispatcher.RideStore.GetRideHistory(r.Context(), uidStr, role, 1, 0)
+	if err != nil {
+		response.Error(w, "Failed to fetch ride history: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if len(rides) == 0 || rides[0].Status != ride.StatusCompleted {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"found": false}`))
+		return
+	}
+
+	rideData := rides[0]
+
+	// Get payment info for the ride.
+	var finalAmount float64
+	var paymentMode string
+	pmt, perr := h.PaymentStore.FindPaymentByRideID(r.Context(), rideData.ID)
+	if perr == nil && pmt != nil {
+		finalAmount = pmt.ChargedAmount
+		paymentMode = string(pmt.PaymentMode)
+	}
+
+	// Explicit-ID fetch enforces ownership so strangers can't pull other rides.
+	if role != "admin" && uidStr != rideData.UserID && (rideData.DriverID == nil || uidStr != *rideData.DriverID) {
+		response.Error(w, "Forbidden: you do not own this ride", http.StatusForbidden)
+		return
+	}
+
+	h.scrubStartOTP(r.Context(), role, rideData)
+
+	statusStr := string(rideData.Status)
+	if rideData.Status == ride.StatusCompleted {
+		statusStr = "completed_rides"
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"found":         true,
+		"status":        statusStr,
+		"data":          rideData,
+		"final_amount":  finalAmount,
+		"payment_mode":  paymentMode,
+	})
+}
+
 // HandleGetDriverDetails is used by the User App to get the driver's info
 func (h *RideHandler) HandleGetDriverDetails(w http.ResponseWriter, r *http.Request) {
 	var req struct {

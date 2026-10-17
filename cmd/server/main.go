@@ -399,6 +399,7 @@ func main() {
 	mux.Handle("POST /api/v2/rides/{id}/cancel", jwtAuth(http.HandlerFunc(rideHandler.HandleCancel)))
 	mux.Handle("POST /api/v2/rides/history", jwtAuth(http.HandlerFunc(rideHandler.HandleGetHistory)))
 	mux.Handle("POST /api/v2/rides/current", jwtAuth(http.HandlerFunc(rideHandler.HandleGetCurrentRide)))
+	mux.Handle("POST /api/v2/rides/recent-completed", jwtAuth(http.HandlerFunc(rideHandler.HandleGetRecentCompletedRide)))
 	mux.Handle("POST /api/v2/rides/driver/details", jwtAuth(http.HandlerFunc(rideHandler.HandleGetDriverDetails)))
 	mux.Handle("POST /api/v2/rides/user/details", jwtAuth(http.HandlerFunc(rideHandler.HandleGetUserDetails)))
 	mux.Handle("POST /api/v2/rides/feedback/list", requireDriver(http.HandlerFunc(feedbackHandler.HandleListFeedback)))

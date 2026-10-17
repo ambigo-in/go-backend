@@ -121,6 +121,11 @@ func (n *WSNotifier) handleRideCompleted(payload []byte) {
 		"amount":  p.FinalAmount,
 	}
 	n.wsManager.SendToRideWatchers(p.RideID, "RIDE_UPDATE", msg)
+	// Reach a backgrounded user who isn't watching this ride (WS closed),
+	// so reopening the app never loops on a stale completed ride.
+	if p.UserID != "" {
+		n.wsManager.SendToClient("user", p.UserID, "RIDE_UPDATE", msg)
+	}
 }
 
 func (n *WSNotifier) handleRideCancelled(payload []byte) {
