@@ -30,10 +30,10 @@ const (
 	ChannelAdminHospitalDeleted = "admin:hospital_deleted"
 	ChannelAdminOfferCreated    = "admin:offer_created"
 	ChannelAdminOfferDeleted    = "admin:offer_deleted"
-	ChannelAdminDriverRejected = "admin:driver_rejected"
-	ChannelReferralCredited    = "referral:credited"
-	ChannelSafetyStoppedWarn  = "safety:stopped_warning"
-	ChannelSafetyStoppedAlarm = "safety:stopped_emergency"
+	ChannelAdminDriverRejected  = "admin:driver_rejected"
+	ChannelReferralCredited     = "referral:credited"
+	ChannelSafetyStoppedWarn    = "safety:stopped_warning"
+	ChannelSafetyStoppedAlarm   = "safety:stopped_emergency"
 	// ChannelRideDestinationChanged is published when a hospital desk
 	// declines a mid-ride patient and the ride is rerouted to the nearest
 	// other hospital. The user must learn the new destination even with
@@ -132,6 +132,7 @@ type RideCompletedPayload struct {
 	RideID      string  `json:"ride_id"`
 	DriverID    string  `json:"driver_id"`
 	UserID      string  `json:"user_id"`
+	PaymentID   string  `json:"payment_id,omitempty"`
 	PaymentMode string  `json:"payment_mode"`
 	FinalAmount float64 `json:"final_amount"`
 	DriverShare float64 `json:"driver_share"`
@@ -146,11 +147,11 @@ type RideCompletedPayload struct {
 
 // RideCancelledPayload is published when a ride is cancelled
 type RideCancelledPayload struct {
-	RideID        string   `json:"ride_id"`
-	Reason        string   `json:"reason"`
-	UserID        string   `json:"user_id,omitempty"`
-	DriverID      string   `json:"driver_id,omitempty"`
-	RequestID     string   `json:"request_id,omitempty"`
+	RideID         string   `json:"ride_id"`
+	Reason         string   `json:"reason"`
+	UserID         string   `json:"user_id,omitempty"`
+	DriverID       string   `json:"driver_id,omitempty"`
+	RequestID      string   `json:"request_id,omitempty"`
 	AvailableTypes []string `json:"available_types,omitempty"`
 }
 

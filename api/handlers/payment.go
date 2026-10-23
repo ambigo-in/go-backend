@@ -51,10 +51,20 @@ func (h *PaymentHandler) HandleGetPending(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	var req struct {
+		RideID string `json:"ride_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
 	var pmt *payment.Payment
 	var err error
 
-	if role == "user" {
+	if req.RideID != "" {
+		pmt, err = h.Store.FindPendingPaymentByRideID(r.Context(), req.RideID)
+		if err == nil && pmt != nil && pmt.UserID != uidStr && pmt.PartnerID != uidStr && role != "admin" {
+			pmt, err = nil, nil
+		}
+	} else if role == "user" {
 		pmt, err = h.Store.FindPendingPaymentByUserID(r.Context(), uidStr)
 	} else if role == "driver" {
 		pmt, err = h.Store.FindPendingPaymentByPartnerID(r.Context(), uidStr)
@@ -123,12 +133,12 @@ func (h *PaymentHandler) settleOnlineTx(r *http.Request, pmt *payment.Payment, r
 			return berr
 		}
 		if err := wTx.InsertLedgerEntry(r.Context(), &payment.WalletTransaction{
-			DriverID:    pmt.PartnerID,
-			Amount:      pmt.DriverShare,
-			Direction:   "credit",
-			TxnType:     "ride_credit",
-			ReferenceID: pmt.ID,
-			Status:      "success",
+			DriverID:     pmt.PartnerID,
+			Amount:       pmt.DriverShare,
+			Direction:    "credit",
+			TxnType:      "ride_credit",
+			ReferenceID:  pmt.ID,
+			Status:       "success",
 			BalanceAfter: &bal,
 		}); err != nil {
 			return err
@@ -178,12 +188,12 @@ func (h *PaymentHandler) settleCashTx(r *http.Request, pmt *payment.Payment) err
 			return berr
 		}
 		return wTx.InsertLedgerEntry(r.Context(), &payment.WalletTransaction{
-			DriverID:    pmt.PartnerID,
-			Amount:      commission,
-			Direction:   "debit",
-			TxnType:     "commission_debit",
-			ReferenceID: pmt.ID,
-			Status:      "success",
+			DriverID:     pmt.PartnerID,
+			Amount:       commission,
+			Direction:    "debit",
+			TxnType:      "commission_debit",
+			ReferenceID:  pmt.ID,
+			Status:       "success",
 			BalanceAfter: &bal,
 		})
 	})
@@ -485,8 +495,8 @@ func (h *PaymentHandler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Re
 	}
 
 	var event struct {
-		Event string `json:"event"`
-		ID    string `json:"id"`
+		Event   string `json:"event"`
+		ID      string `json:"id"`
 		Payload struct {
 			Payment struct {
 				Entity struct {
@@ -605,12 +615,12 @@ func (h *PaymentHandler) HandleRazorpayWebhook(w http.ResponseWriter, r *http.Re
 			return berr
 		}
 		return wTx.InsertLedgerEntry(r.Context(), &payment.WalletTransaction{
-			DriverID:    pmt.PartnerID,
-			Amount:      pmt.DriverShare,
-			Direction:   "credit",
-			TxnType:     "ride_credit",
-			ReferenceID: pmt.ID,
-			Status:      "success",
+			DriverID:     pmt.PartnerID,
+			Amount:       pmt.DriverShare,
+			Direction:    "credit",
+			TxnType:      "ride_credit",
+			ReferenceID:  pmt.ID,
+			Status:       "success",
 			BalanceAfter: &bal,
 		})
 	})

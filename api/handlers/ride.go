@@ -202,9 +202,9 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":          http.StatusText(http.StatusNotFound),
-				"detail":         "No ambulances available nearby",
-				"code":           http.StatusNotFound,
+				"error":           http.StatusText(http.StatusNotFound),
+				"detail":          "No ambulances available nearby",
+				"code":            http.StatusNotFound,
 				"available_types": availableTypes,
 			})
 			return
@@ -225,9 +225,9 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusNotFound)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":          http.StatusText(http.StatusNotFound),
-				"detail":         "No eligible ambulances available nearby",
-				"code":           http.StatusNotFound,
+				"error":           http.StatusText(http.StatusNotFound),
+				"detail":          "No eligible ambulances available nearby",
+				"code":            http.StatusNotFound,
 				"available_types": availableTypes,
 			})
 			return
@@ -470,10 +470,10 @@ func (h *RideHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"error":       http.StatusText(http.StatusConflict),
-				"detail":      "OTP was missing and has been re-issued — ask the customer to refresh their screen, then retry",
-				"code":        http.StatusConflict,
-				"otp_issued":  true,
+				"error":      http.StatusText(http.StatusConflict),
+				"detail":     "OTP was missing and has been re-issued — ask the customer to refresh their screen, then retry",
+				"code":       http.StatusConflict,
+				"otp_issued": true,
 			})
 			return
 		}
@@ -522,9 +522,6 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	if req.DropLat == 0 && req.DropLng == 0 && len(req.Drop.Coordinates) == 2 {
 		req.DropLng, req.DropLat = req.Drop.Coordinates[0], req.Drop.Coordinates[1]
 	}
-	if req.PaymentMode == "" {
-		req.PaymentMode = "cash"
-	}
 
 	rideData, err := h.Dispatcher.RideStore.GetRideByID(r.Context(), rideID)
 	if err != nil || rideData == nil {
@@ -535,6 +532,38 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 	// A3: Only the assigned driver can complete the ride
 	if rideData.DriverID == nil || driverID != *rideData.DriverID {
 		response.Error(w, "Forbidden: you are not the assigned driver for this ride", http.StatusForbidden)
+		return
+	}
+
+	// The payment mode chosen by the user at booking is authoritative. Driver
+	// builds may omit it or send their own default; trusting the request let a
+	// cash-only client mark an online ride as pre-paid cash.
+	paymentMode := rideData.PaymentMode
+	if paymentMode != string(payment.ModeCash) && paymentMode != string(payment.ModeOnline) {
+		paymentMode = req.PaymentMode
+	}
+	if paymentMode != string(payment.ModeCash) && paymentMode != string(payment.ModeOnline) {
+		paymentMode = string(payment.ModeCash)
+	}
+
+	// Idempotent replay: a client that timed out after the commit retries the
+	// same complete call. Return the existing bill instead of a 409 that
+	// strands the driver and the user's post-ride flow.
+	if rideData.Status == ride.StatusCompleted {
+		existing, perr := h.PaymentStore.FindPaymentByRideID(r.Context(), rideID)
+		if perr != nil {
+			response.Error(w, "Failed to complete ride: "+perr.Error(), http.StatusInternalServerError)
+			return
+		}
+		if existing == nil {
+			response.Error(w, "Ride already completed", http.StatusConflict)
+			return
+		}
+		encodeRideCompletion(w, existing, existing.OriginalAmount, routeDistanceKm(rideData), 0, 0, "", "", nil)
+		return
+	}
+	if rideData.Status != ride.StatusInProgress {
+		response.Error(w, "Ride is not in progress", http.StatusConflict)
 		return
 	}
 
@@ -738,7 +767,7 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		OriginalAmount: finalAmount,
 		ChargedAmount:  userAmount,
 		DriverShare:    driverShare,
-		PaymentMode:    payment.PaymentMode(req.PaymentMode),
+		PaymentMode:    payment.PaymentMode(paymentMode),
 		CreatedAt:      time.Now(),
 	}
 
@@ -752,18 +781,11 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if existing != nil {
 		restoreDiscount()
-		response.Error(w, "Ride already has a payment", http.StatusConflict)
+		encodeRideCompletion(w, existing, lockedTotal, lockedKm, recalcKm, 0, "", "", nil)
 		return
 	}
 
-	// Validate payment mode early: anything else hits the DB CHECK as a 500.
-	if req.PaymentMode != "cash" && req.PaymentMode != "online" {
-		restoreDiscount()
-		response.Error(w, "Invalid payment mode (must be cash or online)", http.StatusBadRequest)
-		return
-	}
-
-	if req.PaymentMode == "online" {
+	if paymentMode == string(payment.ModeOnline) {
 		if userAmount <= 0 {
 			// Fully discounted: nothing to collect. Settle immediately as
 			// paid so the bill never sticks unpaid; the platform absorbs
@@ -821,7 +843,12 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		if err := sTx.CreatePayment(r.Context(), pmt); err != nil {
 			return err
 		}
-		if req.PaymentMode != "online" {
+		// Link the ride to its bill so receipt/recovery reads a single source
+		// of truth instead of racing the separate payment lookup.
+		if err := rTx.UpdateRidePayment(r.Context(), rideID, pmt.ID, paymentMode); err != nil {
+			return err
+		}
+		if paymentMode != string(payment.ModeOnline) {
 			commission := pmt.OriginalAmount - pmt.DriverShare
 			if commission > 0 {
 				if !ids.IsValid(driverID) {
@@ -842,12 +869,12 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 					return berr
 				}
 				if err := wTx.InsertLedgerEntry(r.Context(), &payment.WalletTransaction{
-					DriverID:    driverID,
-					Amount:      commission,
-					Direction:   "debit",
-					TxnType:     "commission_debit",
-					ReferenceID: pmt.ID,
-					Status:      "success",
+					DriverID:     driverID,
+					Amount:       commission,
+					Direction:    "debit",
+					TxnType:      "commission_debit",
+					ReferenceID:  pmt.ID,
+					Status:       "success",
 					BalanceAfter: &bal,
 				}); err != nil {
 					return err
@@ -867,12 +894,12 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 				return berr
 			}
 			if err := wTx.InsertLedgerEntry(r.Context(), &payment.WalletTransaction{
-				DriverID:    driverID,
-				Amount:      pmt.DriverShare,
-				Direction:   "credit",
-				TxnType:     "ride_credit",
-				ReferenceID: pmt.ID,
-				Status:      "success",
+				DriverID:     driverID,
+				Amount:       pmt.DriverShare,
+				Direction:    "credit",
+				TxnType:      "ride_credit",
+				ReferenceID:  pmt.ID,
+				Status:       "success",
 				BalanceAfter: &bal,
 			}); err != nil {
 				return err
@@ -880,8 +907,17 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		}
 		return nil
 	}); err != nil {
-		logger.Log.Error().Err(err).Str("ride_id", rideID).Str("request_id", reqID).Msg("Failed to complete ride transaction")
 		restoreDiscount()
+		// A concurrent completion may have won the status CAS while this
+		// request was in flight. Replay the winning bill instead of failing
+		// a retry that would otherwise strand the apps.
+		if fresh, ferr := h.Dispatcher.RideStore.GetRideByID(r.Context(), rideID); ferr == nil && fresh != nil && fresh.Status == ride.StatusCompleted {
+			if existing, perr := h.PaymentStore.FindPaymentByRideID(r.Context(), rideID); perr == nil && existing != nil {
+				encodeRideCompletion(w, existing, lockedTotal, lockedKm, recalcKm, extraKm, recalcReason, fareNote, nil)
+				return
+			}
+		}
+		logger.Log.Error().Err(err).Str("ride_id", rideID).Str("request_id", reqID).Msg("Failed to complete ride transaction")
 		response.Error(w, "Failed to complete ride: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -890,7 +926,8 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		RideID:          rideID,
 		DriverID:        driverID,
 		UserID:          rideData.UserID,
-		PaymentMode:     req.PaymentMode,
+		PaymentID:       pmt.ID,
+		PaymentMode:     paymentMode,
 		FinalAmount:     userAmount,
 		DriverShare:     driverShare,
 		DropAddress:     req.DropAddress,
@@ -922,21 +959,34 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			"total": f.Total, "driver_share": f.DriverShare,
 		}
 	}
+	encodeRideCompletion(w, pmt, lockedTotal, lockedKm, recalcKm, extraKm, recalcReason, fareNote, breakup)
+}
+
+// encodeRideCompletion writes the canonical completion/replay response.
+// Retried completes must return exactly the same shape as the winning call.
+func encodeRideCompletion(w http.ResponseWriter, pmt *payment.Payment, estimatedAmount, estimatedKm, actualKm, extraKm float64, fareReason, fareNote string, breakup map[string]interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"detail":            "Ride Completed",
 		"payment_id":        pmt.ID,
 		"razorpay_order_id": pmt.RazorpayOrderID,
-		"take_cash":         req.PaymentMode != "online",
-		"amount":            userAmount,
-		"estimated_amount":  lockedTotal,
-		"estimated_km":      lockedKm,
-		"actual_km":         recalcKm,
+		"take_cash":         pmt.PaymentMode != payment.ModeOnline,
+		"amount":            pmt.ChargedAmount,
+		"estimated_amount":  estimatedAmount,
+		"estimated_km":      estimatedKm,
+		"actual_km":         actualKm,
 		"extra_km":          extraKm,
-		"fare_reason":       recalcReason,
+		"fare_reason":       fareReason,
 		"fare_note":         fareNote,
 		"fare_breakup":      breakup,
 	})
+}
+
+func routeDistanceKm(r *ride.Ride) float64 {
+	if r != nil && r.Route != nil {
+		return r.Route.DistanceKm
+	}
+	return 0
 }
 
 func (h *RideHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
@@ -978,9 +1028,9 @@ func (h *RideHandler) HandleCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.EventBus.PublishEvent(eventbus.ChannelRideCancelled, eventbus.RideCancelledPayload{
-		RideID:    rideID,
-		Reason:    cancelReason,
-		UserID:    rideData.UserID,
+		RideID: rideID,
+		Reason: cancelReason,
+		UserID: rideData.UserID,
 		DriverID: func() string {
 			if rideData.DriverID != nil {
 				return *rideData.DriverID
@@ -1090,9 +1140,10 @@ func (h *RideHandler) HandleGetCurrentRide(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// HandleGetRecentCompletedRide returns the user's most recent COMPLETED ride
-// (if any) along with its payment amount, so the app can show a receipt after
-// reopening from background when the ride is no longer "current".
+// HandleGetRecentCompletedRide returns a COMPLETED ride that is recent enough
+// to still need post-ride handling (payment, rating, receipt). Callers pass
+// completed_after to bound recovery; old receipts must never resurface on
+// every launch.
 func (h *RideHandler) HandleGetRecentCompletedRide(w http.ResponseWriter, r *http.Request) {
 	uidStr, ok := r.Context().Value(middleware.UserIDKey).(string)
 	if !ok {
@@ -1106,50 +1157,76 @@ func (h *RideHandler) HandleGetRecentCompletedRide(w http.ResponseWriter, r *htt
 	}
 	role = h.upgradeUnvrfDriverRole(uidStr, role)
 
-	// Get the user's most recent ride (ordered by created_at DESC).
-	rides, err := h.Dispatcher.RideStore.GetRideHistory(r.Context(), uidStr, role, 1, 0)
+	var req struct {
+		RideID         string `json:"ride_id"`
+		CompletedAfter string `json:"completed_after"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	cutoff := time.Now().Add(-24 * time.Hour)
+	if req.CompletedAfter != "" {
+		if t, terr := time.Parse(time.RFC3339, req.CompletedAfter); terr == nil {
+			cutoff = t
+		}
+	}
+
+	var rideData *ride.Ride
+	var err error
+	if role == "driver" {
+		// Driver app parity: newest ride, still gated by completion freshness.
+		var rides []*ride.Ride
+		rides, err = h.Dispatcher.RideStore.GetRideHistory(r.Context(), uidStr, role, 1, 0)
+		if err == nil && len(rides) > 0 && rides[0].Status == ride.StatusCompleted &&
+			rides[0].Time.CompletedAt != nil && !rides[0].Time.CompletedAt.Before(cutoff) {
+			rideData = rides[0]
+			if req.RideID != "" && rideData.ID != req.RideID {
+				rideData = nil
+			}
+		}
+	} else {
+		rideData, err = h.Dispatcher.RideStore.GetLatestCompletedRide(r.Context(), uidStr, req.RideID, &cutoff)
+	}
 	if err != nil {
 		response.Error(w, "Failed to fetch ride history: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if len(rides) == 0 || rides[0].Status != ride.StatusCompleted {
-		w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Content-Type", "application/json")
+	if rideData == nil {
 		w.Write([]byte(`{"found": false}`))
-		return
-	}
-
-	rideData := rides[0]
-
-	// Get payment info for the ride.
-	var finalAmount float64
-	var paymentMode string
-	pmt, perr := h.PaymentStore.FindPaymentByRideID(r.Context(), rideData.ID)
-	if perr == nil && pmt != nil {
-		finalAmount = pmt.ChargedAmount
-		paymentMode = string(pmt.PaymentMode)
-	}
-
-	// Explicit-ID fetch enforces ownership so strangers can't pull other rides.
-	if role != "admin" && uidStr != rideData.UserID && (rideData.DriverID == nil || uidStr != *rideData.DriverID) {
-		response.Error(w, "Forbidden: you do not own this ride", http.StatusForbidden)
 		return
 	}
 
 	h.scrubStartOTP(r.Context(), role, rideData)
 
-	statusStr := string(rideData.Status)
-	if rideData.Status == ride.StatusCompleted {
-		statusStr = "completed_rides"
+	finalAmount := 0.0
+	paymentMode := rideData.PaymentMode
+	paymentID := ""
+	paymentPaid := false
+	var razorpayOrderID any
+	if pmt, perr := h.PaymentStore.FindPaymentByRideID(r.Context(), rideData.ID); perr == nil && pmt != nil {
+		finalAmount = pmt.ChargedAmount
+		paymentMode = string(pmt.PaymentMode)
+		paymentID = pmt.ID
+		paymentPaid = pmt.Paid
+		razorpayOrderID = pmt.RazorpayOrderID
 	}
 
-	w.Header().Set("Content-Type", "application/json")
+	completedAt := ""
+	if rideData.Time.CompletedAt != nil {
+		completedAt = rideData.Time.CompletedAt.Format(time.RFC3339)
+	}
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"found":         true,
-		"status":        statusStr,
-		"data":          rideData,
-		"final_amount":  finalAmount,
-		"payment_mode":  paymentMode,
+		"found":             true,
+		"status":            "completed_rides",
+		"data":              rideData,
+		"final_amount":      finalAmount,
+		"payment_mode":      paymentMode,
+		"payment_id":        paymentID,
+		"payment_paid":      paymentPaid,
+		"razorpay_order_id": razorpayOrderID,
+		"completed_at":      completedAt,
 	})
 }
 
@@ -1253,10 +1330,10 @@ func (h *RideHandler) HandleGetUserDetails(w http.ResponseWriter, r *http.Reques
 
 func (h *RideHandler) HandleRoutePreview(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		OriginLat  float64 `json:"origin_lat" validate:"required,min=-90,max=90"`
-		OriginLng  float64 `json:"origin_lng" validate:"required,min=-180,max=180"`
-		DestLat    float64 `json:"dest_lat" validate:"required,min=-90,max=90"`
-		DestLng    float64 `json:"dest_lng" validate:"required,min=-180,max=180"`
+		OriginLat float64 `json:"origin_lat" validate:"required,min=-90,max=90"`
+		OriginLng float64 `json:"origin_lng" validate:"required,min=-180,max=180"`
+		DestLat   float64 `json:"dest_lat" validate:"required,min=-90,max=90"`
+		DestLng   float64 `json:"dest_lng" validate:"required,min=-180,max=180"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -1319,7 +1396,7 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		emgMult, nightMult := h.surcharges(r.Context())
 		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS, emgMult)
 		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
-		total := payment.RoundRupees(base+emergency+night)
+		total := payment.RoundRupees(base + emergency + night)
 
 		driverShare := payment.RoundRupees(total * effShare / 100.0)
 		regionIDStr := ""
@@ -1367,7 +1444,7 @@ func (h *RideHandler) HandleFareEstimate(w http.ResponseWriter, r *http.Request)
 		emgMult, nightMult := h.surcharges(r.Context())
 		emergency := h.PricingEngine.CalculateEmergencySurcharge(base, req.IsSOS, emgMult)
 		night := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
-		total := payment.RoundRupees(base+emergency+night)
+		total := payment.RoundRupees(base + emergency + night)
 
 		driverShare := payment.RoundRupees(total * effShare / 100.0)
 

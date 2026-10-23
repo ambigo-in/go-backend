@@ -68,48 +68,48 @@ const rideSelect = `SELECT id::text, user_id::text, driver_id::text, amb_type_id
 // scanRide scans a single row into a Ride. Handles JSONB unmarshaling and NULLs.
 func scanRide(row pgx.Row) (*Ride, error) {
 	var (
-		id                    string
-		userID                string
-		driverIDNS            sql.NullString
-		ambTypeIDNS           sql.NullString
-		hospitalIDNS          sql.NullString
-		startOTPNS            sql.NullString
-		status                string
-		pickupJSON            []byte
-		pickupAddress         string
-		pickupH3Cell          string
-		dropJSON              []byte
-		dropAddress           string
-		routeDistance         sql.NullFloat64
-		routeDuration         sql.NullInt32
-		routePolylineNS       sql.NullString
-		fareBase              sql.NullFloat64
-		fareDistance          sql.NullFloat64
-		fareEmergency         sql.NullFloat64
-		fareNight             sql.NullFloat64
-		fareWaiting           sql.NullFloat64
-		fareTotal             sql.NullFloat64
-		fareDriverShare       sql.NullFloat64
-		fareReferralDiscount  sql.NullFloat64
-		fareCurrencyNS        sql.NullString
-		emergencyTypeNS       sql.NullString
-		emergencyPriority     int
-		paymentMode           string
-		paymentIDNS           sql.NullString
-		createdAt             time.Time
-		assignedAt            sql.NullTime
-		arrivedAt             sql.NullTime
-		startedAt             sql.NullTime
-		completedAt           sql.NullTime
-		cancelledAt           sql.NullTime
-		dispatchCandidates    int
-		dispatchOffersSent    int
+		id                     string
+		userID                 string
+		driverIDNS             sql.NullString
+		ambTypeIDNS            sql.NullString
+		hospitalIDNS           sql.NullString
+		startOTPNS             sql.NullString
+		status                 string
+		pickupJSON             []byte
+		pickupAddress          string
+		pickupH3Cell           string
+		dropJSON               []byte
+		dropAddress            string
+		routeDistance          sql.NullFloat64
+		routeDuration          sql.NullInt32
+		routePolylineNS        sql.NullString
+		fareBase               sql.NullFloat64
+		fareDistance           sql.NullFloat64
+		fareEmergency          sql.NullFloat64
+		fareNight              sql.NullFloat64
+		fareWaiting            sql.NullFloat64
+		fareTotal              sql.NullFloat64
+		fareDriverShare        sql.NullFloat64
+		fareReferralDiscount   sql.NullFloat64
+		fareCurrencyNS         sql.NullString
+		emergencyTypeNS        sql.NullString
+		emergencyPriority      int
+		paymentMode            string
+		paymentIDNS            sql.NullString
+		createdAt              time.Time
+		assignedAt             sql.NullTime
+		arrivedAt              sql.NullTime
+		startedAt              sql.NullTime
+		completedAt            sql.NullTime
+		cancelledAt            sql.NullTime
+		dispatchCandidates     int
+		dispatchOffersSent     int
 		dispatchOffersDeclined int
 		dispatchOffersTimedOut int
-		dispatchLatency       int
-		cancellationReasonNS  sql.NullString
-		availableTypesJSON    []byte
-		latestConditionJSON   []byte
+		dispatchLatency        int
+		cancellationReasonNS   sql.NullString
+		availableTypesJSON     []byte
+		latestConditionJSON    []byte
 		conditionOnArrivalJSON []byte
 	)
 
@@ -337,48 +337,48 @@ func scanRides(rows pgx.Rows) ([]*Ride, error) {
 		// Reuse scan by creating a row wrapper: rows as pgx.Row is not directly compatible,
 		// so we manually scan here with same variables.
 		var (
-			id                    string
-			userID                string
-			driverIDNS            sql.NullString
-			ambTypeIDNS           sql.NullString
-			hospitalIDNS          sql.NullString
-			startOTPNS            sql.NullString
-			status                string
-			pickupJSON            []byte
-			pickupAddress         string
-			pickupH3Cell          string
-			dropJSON              []byte
-			dropAddress           string
-			routeDistance         sql.NullFloat64
-			routeDuration         sql.NullInt32
-			routePolylineNS       sql.NullString
-			fareBase              sql.NullFloat64
-			fareDistance          sql.NullFloat64
-			fareEmergency         sql.NullFloat64
-			fareNight             sql.NullFloat64
-			fareWaiting           sql.NullFloat64
-			fareTotal             sql.NullFloat64
-			fareDriverShare       sql.NullFloat64
-			fareReferralDiscount  sql.NullFloat64
-			fareCurrencyNS        sql.NullString
-			emergencyTypeNS       sql.NullString
-			emergencyPriority     int
-			paymentMode           string
-			paymentIDNS           sql.NullString
-			createdAt             time.Time
-			assignedAt            sql.NullTime
-			arrivedAt             sql.NullTime
-			startedAt             sql.NullTime
-			completedAt           sql.NullTime
-			cancelledAt           sql.NullTime
-			dispatchCandidates    int
-			dispatchOffersSent    int
+			id                     string
+			userID                 string
+			driverIDNS             sql.NullString
+			ambTypeIDNS            sql.NullString
+			hospitalIDNS           sql.NullString
+			startOTPNS             sql.NullString
+			status                 string
+			pickupJSON             []byte
+			pickupAddress          string
+			pickupH3Cell           string
+			dropJSON               []byte
+			dropAddress            string
+			routeDistance          sql.NullFloat64
+			routeDuration          sql.NullInt32
+			routePolylineNS        sql.NullString
+			fareBase               sql.NullFloat64
+			fareDistance           sql.NullFloat64
+			fareEmergency          sql.NullFloat64
+			fareNight              sql.NullFloat64
+			fareWaiting            sql.NullFloat64
+			fareTotal              sql.NullFloat64
+			fareDriverShare        sql.NullFloat64
+			fareReferralDiscount   sql.NullFloat64
+			fareCurrencyNS         sql.NullString
+			emergencyTypeNS        sql.NullString
+			emergencyPriority      int
+			paymentMode            string
+			paymentIDNS            sql.NullString
+			createdAt              time.Time
+			assignedAt             sql.NullTime
+			arrivedAt              sql.NullTime
+			startedAt              sql.NullTime
+			completedAt            sql.NullTime
+			cancelledAt            sql.NullTime
+			dispatchCandidates     int
+			dispatchOffersSent     int
 			dispatchOffersDeclined int
 			dispatchOffersTimedOut int
-			dispatchLatency       int
-			cancellationReasonNS  sql.NullString
-			availableTypesJSON    []byte
-			latestConditionJSON   []byte
+			dispatchLatency        int
+			cancellationReasonNS   sql.NullString
+			availableTypesJSON     []byte
+			latestConditionJSON    []byte
 			conditionOnArrivalJSON []byte
 		)
 		err := rows.Scan(
@@ -906,6 +906,41 @@ func (s *Store) UpdateRideFare(ctx context.Context, rideID string, fare *Fare) e
 		rideID, fare.BaseFare, fare.DistanceFare, fare.EmergencySurcharge, fare.NightSurcharge, fare.WaitingCharge, fare.Total, fare.DriverShare, fare.ReferralDiscount, fare.Currency,
 	)
 	return err
+}
+
+// UpdateRidePayment links a ride to its bill and records the settled payment
+// mode, so completion state is readable from the ride row alone.
+func (s *Store) UpdateRidePayment(ctx context.Context, rideID string, paymentID string, paymentMode string) error {
+	_, err := s.db.Exec(ctx,
+		`UPDATE rides SET payment_id=$2::uuid, payment_mode=$3 WHERE id=$1::uuid`,
+		rideID, paymentID, paymentMode,
+	)
+	return err
+}
+
+// GetLatestCompletedRide returns the newest COMPLETED ride for a user,
+// optionally restricted by ride id and completion time. Bounded so an old
+// receipt cannot resurface on every app launch.
+func (s *Store) GetLatestCompletedRide(ctx context.Context, userID string, rideID string, completedAfter *time.Time) (*Ride, error) {
+	var (
+		row pgx.Row
+	)
+	switch {
+	case rideID != "":
+		row = s.db.QueryRow(ctx, rideSelect+` WHERE id=$1::uuid AND user_id=$2::uuid AND status='COMPLETED'`, rideID, userID)
+	case completedAfter != nil:
+		row = s.db.QueryRow(ctx, rideSelect+` WHERE user_id=$1::uuid AND status='COMPLETED' AND completed_at >= $2 ORDER BY completed_at DESC LIMIT 1`, userID, *completedAfter)
+	default:
+		row = s.db.QueryRow(ctx, rideSelect+` WHERE user_id=$1::uuid AND status='COMPLETED' ORDER BY completed_at DESC LIMIT 1`, userID)
+	}
+	ride, err := scanRide(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return ride, nil
 }
 
 // EscalateEmergencyForStoppedVehicle flips a normal IN_PROGRESS ride to

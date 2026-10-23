@@ -42,6 +42,7 @@ type RideStoreAPI interface {
 	UpdateRideStatus(ctx context.Context, rideID string, currentStatus, nextStatus ride.RideStatus) error
 	ListTrail(ctx context.Context, rideID string) ([]ride.TrailPoint, error)
 	GetRideHistory(ctx context.Context, entityID, role string, limit, skip int64) ([]*ride.Ride, error)
+	GetLatestCompletedRide(ctx context.Context, userID, rideID string, completedAfter *time.Time) (*ride.Ride, error)
 	Pool() *pgxpool.Pool
 	WithTx(tx pgx.Tx) *ride.Store
 }

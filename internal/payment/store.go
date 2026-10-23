@@ -125,9 +125,10 @@ func scanPayment(row pgx.Row) (*Payment, error) {
 
 const paymentSelect = `SELECT id::text, user_id, partner_id, ride_id, description, original_amount, charged_amount, driver_share, payment_mode, paid, razorpay_order_id, razorpay_payment_id, paid_at, created_at, offer FROM payments`
 
-// FindPendingPaymentByUserID looks for an unpaid payment belonging to a user (paid=false).
+// FindPendingPaymentByUserID looks for an unpaid payment belonging to a user.
+// Newest first: a stale unpaid bill must never shadow the ride just finished.
 func (s *Store) FindPendingPaymentByUserID(ctx context.Context, userID string) (*Payment, error) {
-	row := s.db.QueryRow(ctx, paymentSelect+` WHERE user_id=$1 AND paid=false LIMIT 1`, userID)
+	row := s.db.QueryRow(ctx, paymentSelect+` WHERE user_id=$1 AND paid=false ORDER BY created_at DESC LIMIT 1`, userID)
 	p, err := scanPayment(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -140,7 +141,20 @@ func (s *Store) FindPendingPaymentByUserID(ctx context.Context, userID string) (
 
 // FindPendingPaymentByPartnerID looks for an unpaid payment belonging to a driver (partner).
 func (s *Store) FindPendingPaymentByPartnerID(ctx context.Context, partnerID string) (*Payment, error) {
-	row := s.db.QueryRow(ctx, paymentSelect+` WHERE partner_id=$1 AND paid=false LIMIT 1`, partnerID)
+	row := s.db.QueryRow(ctx, paymentSelect+` WHERE partner_id=$1 AND paid=false ORDER BY created_at DESC LIMIT 1`, partnerID)
+	p, err := scanPayment(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return p, nil
+}
+
+// FindPendingPaymentByRideID returns the unpaid bill for a specific ride.
+func (s *Store) FindPendingPaymentByRideID(ctx context.Context, rideID string) (*Payment, error) {
+	row := s.db.QueryRow(ctx, paymentSelect+` WHERE ride_id=$1 AND paid=false ORDER BY created_at DESC LIMIT 1`, rideID)
 	p, err := scanPayment(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

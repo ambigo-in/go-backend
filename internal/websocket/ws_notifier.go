@@ -116,9 +116,15 @@ func (n *WSNotifier) handleRideCompleted(payload []byte) {
 	}
 	n.wsManager.ClearActiveRide(p.DriverID)
 	msg := map[string]interface{}{
-		"ride_id": p.RideID,
-		"status":  "COMPLETED",
-		"amount":  p.FinalAmount,
+		"ride_id":          p.RideID,
+		"status":           "COMPLETED",
+		"amount":           p.FinalAmount,
+		"payment_id":       p.PaymentID,
+		"payment_mode":     p.PaymentMode,
+		"estimated_amount": p.EstimatedAmount,
+		"extra_km":         p.ExtraKm,
+		"fare_reason":      p.FareReason,
+		"fare_note":        p.FareNote,
 	}
 	n.wsManager.SendToRideWatchers(p.RideID, "RIDE_UPDATE", msg)
 	// Reach a backgrounded user who isn't watching this ride (WS closed),

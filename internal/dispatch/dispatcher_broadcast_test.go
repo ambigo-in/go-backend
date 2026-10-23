@@ -116,6 +116,10 @@ func (f *fakeRideStore) GetRideHistory(_ context.Context, _, _ string, _, _ int6
 	return nil, nil
 }
 
+func (f *fakeRideStore) GetLatestCompletedRide(_ context.Context, _, _ string, _ *time.Time) (*ride.Ride, error) {
+	return nil, nil
+}
+
 func (f *fakeRideStore) Pool() *pgxpool.Pool { return nil }
 
 func (f *fakeRideStore) WithTx(_ pgx.Tx) *ride.Store { return nil }

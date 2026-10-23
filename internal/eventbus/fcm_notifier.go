@@ -290,15 +290,15 @@ func (n *FCMNotifier) handleRideDestinationChanged(payload []byte) {
 		body = "Your ambulance is now heading to " + p.HospitalName + "."
 	}
 	data := map[string]string{
-		"type":           "DESTINATION_CHANGED",
-		"ride_id":        p.RideID,
-		"hospital_id":    p.HospitalID,
-		"hospital_name":  p.HospitalName,
-		"drop_lat":       fmt.Sprintf("%f", p.DropLat),
-		"drop_lng":       fmt.Sprintf("%f", p.DropLng),
-		"drop_address":   p.DropAddress,
-		"title":          "Destination changed",
-		"body":           body,
+		"type":          "DESTINATION_CHANGED",
+		"ride_id":       p.RideID,
+		"hospital_id":   p.HospitalID,
+		"hospital_name": p.HospitalName,
+		"drop_lat":      fmt.Sprintf("%f", p.DropLat),
+		"drop_lng":      fmt.Sprintf("%f", p.DropLng),
+		"drop_address":  p.DropAddress,
+		"title":         "Destination changed",
+		"body":          body,
 	}
 
 	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
@@ -340,12 +340,16 @@ func (n *FCMNotifier) handleRideCompleted(payload []byte) {
 	}
 
 	data := map[string]string{
-		"type":         "RIDE_COMPLETED",
-		"ride_id":      p.RideID,
-		"amount":       fmt.Sprintf("%.2f", p.FinalAmount),
-		"payment_mode": p.PaymentMode,
-		"title":        "Ride completed",
-		"body":         fmt.Sprintf("Ride completed. Total fare ₹%.2f.", p.FinalAmount),
+		"type":             "RIDE_COMPLETED",
+		"ride_id":          p.RideID,
+		"payment_id":       p.PaymentID,
+		"amount":           fmt.Sprintf("%.2f", p.FinalAmount),
+		"payment_mode":     p.PaymentMode,
+		"estimated_amount": fmt.Sprintf("%.2f", p.EstimatedAmount),
+		"extra_km":         fmt.Sprintf("%.1f", p.ExtraKm),
+		"fare_note":        p.FareNote,
+		"title":            "Ride completed",
+		"body":             fmt.Sprintf("Ride completed. Total fare ₹%.2f.", p.FinalAmount),
 	}
 
 	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
