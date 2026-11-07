@@ -47,6 +47,11 @@ type AppConfig struct {
 
 	// Wallet (withdrawals)
 	WithdrawalFee float64
+	// BankVerificationBypass skips the Zwitch bank-account verification call
+	// and the first-payout gate. For launches where the Zwitch verification
+	// product is not yet approved. drivers.wallet_verified is left untouched
+	// so turning this off re-arms the gate with no data cleanup.
+	BankVerificationBypass bool
 
 	// Cloudshope (Call Masking)
 	CloudshopeToken      string
@@ -124,6 +129,7 @@ func LoadConfig() *AppConfig {
 		ZwitchProxyURL:    os.Getenv("ZWITCH_PROXY_URL"),
 		ZwitchWebhookSecret: os.Getenv("ZWITCH_WEBHOOK_SECRET"),
 		WithdrawalFee:     envFloatOrDefault("WITHDRAWAL_FEE", 7),
+		BankVerificationBypass: os.Getenv("BANK_VERIFICATION_BYPASS") == "true",
 
 		CloudshopeToken:      os.Getenv("CLOUDSHOPE_TOKEN"),
 		CloudshopeNumber:     os.Getenv("CLOUDSHOPE_NUMBER"),

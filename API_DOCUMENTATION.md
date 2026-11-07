@@ -321,6 +321,7 @@ See [WEBSOCKET_DOCUMENTATION.md](WEBSOCKET_DOCUMENTATION.md) for complete WebSoc
 | `CLOUDSHOPE_NUMBER` | No | — | Cloudshope virtual number |
 | `FIREBASE_CREDENTIALS_PATH` | No | — | Firebase service account JSON path |
 | `ALLOW_STALE_REFRESH_CHAIN` | No | `false` | Enable stale refresh token recovery |
+| `BANK_VERIFICATION_BYPASS` | No | `false` | Skip Zwitch bank verification + first-payout gate (unapproved verification product) |
 
 ---
 

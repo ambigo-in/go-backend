@@ -31,6 +31,11 @@ type WalletHandler struct {
 	ZwitchService       *payment.ZwitchService
 	WithdrawalFee       float64
 	ZwitchWebhookSecret string
+	// BankVerificationBypass skips the Zwitch verification call and the
+	// first-payout gate while the provider's verification product is
+	// unapproved. The stored flag is never forged, so disabling the bypass
+	// re-arms the gate for exactly the drivers who skipped it.
+	BankVerificationBypass bool
 }
 
 func NewWalletHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, wStore *payment.WalletStore, zService *payment.ZwitchService) *WalletHandler {
@@ -57,6 +62,25 @@ func (h *WalletHandler) SetZwitchWebhookSecret(secret string) {
 	h.ZwitchWebhookSecret = secret
 }
 
+// SetBankVerificationBypass wires BANK_VERIFICATION_BYPASS. Off by default so a
+// missing env never silently disables a money control.
+func (h *WalletHandler) SetBankVerificationBypass(bypass bool) {
+	h.BankVerificationBypass = bypass
+}
+
+// effectiveWalletVerified reports whether this driver may withdraw, which is
+// not the same as what the wallet_verified column says while the bypass is on.
+func (h *WalletHandler) effectiveWalletVerified(d *auth.Driver) bool {
+	return d.WalletVerified || h.BankVerificationBypass
+}
+
+// walletGetResponse keeps the existing flat bank-details shape (old apps parse
+// it directly) and adds the effective verification state alongside it.
+type walletGetResponse struct {
+	*auth.WalletDetails
+	WalletVerified bool `json:"wallet_verified"`
+}
+
 func (h *WalletHandler) fee() float64 {
 	if h.WithdrawalFee < 0 {
 		return 7
@@ -78,7 +102,15 @@ func (h *WalletHandler) HandleGetWallet(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(driver.WalletDetails)
+	if driver.WalletDetails == nil {
+		// Old apps check for null to render "No bank details added".
+		json.NewEncoder(w).Encode(nil)
+		return
+	}
+	json.NewEncoder(w).Encode(walletGetResponse{
+		WalletDetails:  driver.WalletDetails,
+		WalletVerified: h.effectiveWalletVerified(driver),
+	})
 }
 
 func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Request) {
@@ -161,7 +193,10 @@ func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Reques
 	// account whose verification failed).
 	// Also verify whenever the driver is currently unverified (e.g. a prior
 	// verification failed and the driver re-saves the same details).
-	needsVerify := accountChanged || !driver.WalletVerified
+	// The bypass skips the provider call entirely: an unapproved verification
+	// product returns 4xx on every save, which would both error at the driver
+	// and count toward the shared Zwitch circuit breaker that payouts use.
+	needsVerify := !h.BankVerificationBypass && (accountChanged || !driver.WalletVerified)
 	if accountChanged {
 		if verr := payment.WithTx(r.Context(), h.WalletStore.Pool(), func(tx pgx.Tx) error {
 			wTx := h.WalletStore.WithTx(tx)
@@ -183,12 +218,21 @@ func (h *WalletHandler) HandleUpdateWallet(w http.ResponseWriter, r *http.Reques
 	if needsVerify {
 		if verr := h.verifyAndMarkAccount(r, uidStr, &req); verr != nil {
 			logger.Log.Error().Err(verr).Str("driver_id", uidStr).Msg("Bank verification failed")
-			json.NewEncoder(w).Encode(map[string]string{"detail": "Bank details saved. Verification failed — please check the account and retry before withdrawing."})
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"detail":          "Bank details saved. Verification failed — please check the account and retry before withdrawing.",
+				"wallet_verified": false,
+			})
 			return
 		}
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"detail": "Wallet details updated successfully"})
+	// Reaching here means verification passed, was already passed, or was
+	// bypassed — all withdrawable. `driver` is the pre-update snapshot, so it
+	// cannot be used to compute this.
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"detail":          "Wallet details updated successfully",
+		"wallet_verified": true,
+	})
 }
 
 // ifscRe is the RBI IFSC format: 4-letter bank code, 0, 6-char branch code.
@@ -280,7 +324,7 @@ func (h *WalletHandler) HandleWithdraw(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// First-payout gate: details must have passed bank verification.
-	if !driver.WalletVerified {
+	if !h.effectiveWalletVerified(driver) {
 		response.Error(w, "Bank account not verified yet — please save your bank details and complete verification first", http.StatusForbidden)
 		return
 	}

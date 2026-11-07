@@ -200,6 +200,10 @@ func main() {
 	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
 	walletHandler.SetWithdrawalFee(appConfig.WithdrawalFee)
 	walletHandler.SetZwitchWebhookSecret(appConfig.ZwitchWebhookSecret)
+	walletHandler.SetBankVerificationBypass(appConfig.BankVerificationBypass)
+	if appConfig.BankVerificationBypass {
+		logger.Log.Warn().Msg("BANK_VERIFICATION_BYPASS is on: Zwitch bank verification and the first-payout gate are disabled")
+	}
 	// Settle stuck withdrawals: every 5m, resolve 'pending' rows older than 15m.
 	walletHandler.StartPendingSweeper(5*time.Minute, 15*time.Minute)
 	adminHandler.SetWalletStore(walletStore)
