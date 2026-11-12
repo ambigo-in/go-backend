@@ -28,6 +28,8 @@ type AuthHandler struct {
 	AllowStaleRefreshChain bool
 	ReferralService        *referral.Service
 	MDStore                *admin.Store
+	ReviewOTPNumbers       map[string]bool
+	ReviewOTPCode          string
 }
 
 func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSecret string, smsCfg auth.SMSCountryConfig, allowStaleRefreshChain bool, referralService *referral.Service) *AuthHandler {
@@ -44,6 +46,16 @@ func NewAuthHandler(authStore *auth.Store, eventBus *eventbus.InMemoryBus, jwtSe
 // SetMDStore wires MD ambulance link checks (nil-safe when unset, e.g. tests).
 func (h *AuthHandler) SetMDStore(store *admin.Store) {
 	h.MDStore = store
+}
+
+// SetReviewOTP enables fixed-code login for App Store review test numbers.
+func (h *AuthHandler) SetReviewOTP(numbers map[string]bool, code string) {
+	h.ReviewOTPNumbers = numbers
+	h.ReviewOTPCode = code
+}
+
+func (h *AuthHandler) isReviewNumber(mobile string) bool {
+	return h.ReviewOTPNumbers[mobile]
 }
 
 // blockedByMD reports whether an MD-linked mobile has no active link.
@@ -86,6 +98,16 @@ func (h *AuthHandler) HandleUserRequestOTP(w http.ResponseWriter, r *http.Reques
 	// V11: Validate mobile number
 	if !mobileRegex.MatchString(payload.Mobile) {
 		response.Error(w, "Invalid mobile number", http.StatusBadRequest)
+		return
+	}
+
+	// App Store review test number: fixed code accepted at verify, no SMS.
+	if h.isReviewNumber(payload.Mobile) {
+		var name string
+		if existingUser, _ := h.AuthStore.FindUserByMobile(r.Context(), payload.Mobile); existingUser != nil {
+			name = existingUser.Name
+		}
+		response.Success(w, http.StatusOK, map[string]string{"detail": "OTP sent", "name": name})
 		return
 	}
 
@@ -138,32 +160,39 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// V13: Check lockout before OTP verify
-	locked, err := h.AuthStore.IsOTPLocked(r.Context(), payload.Mobile)
-	if err != nil {
-		response.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-	if locked {
-		response.Error(w, "Too many attempts. Try again later.", http.StatusTooManyRequests)
-		return
-	}
+	var valid bool
+	if h.isReviewNumber(payload.Mobile) {
+		valid = payload.OTP == h.ReviewOTPCode
+	} else {
+		// V13: Check lockout before OTP verify
+		locked, err := h.AuthStore.IsOTPLocked(r.Context(), payload.Mobile)
+		if err != nil {
+			response.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		if locked {
+			response.Error(w, "Too many attempts. Try again later.", http.StatusTooManyRequests)
+			return
+		}
 
-	// V2: VerifyOTP now checks expiry in application code
-	valid, err := h.AuthStore.VerifyOTP(r.Context(), payload.Mobile, payload.OTP)
-	if err != nil {
-		response.Error(w, "Internal error", http.StatusInternalServerError)
-		return
+		// V2: VerifyOTP now checks expiry in application code
+		valid, err = h.AuthStore.VerifyOTP(r.Context(), payload.Mobile, payload.OTP)
+		if err != nil {
+			response.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		if !valid {
+			// V13: Track failed attempt
+			_ = h.AuthStore.IncrementFailedOTP(r.Context(), payload.Mobile)
+		} else {
+			// V13: Reset failed attempts on success
+			_ = h.AuthStore.ResetFailedOTP(r.Context(), payload.Mobile)
+		}
 	}
 	if !valid {
-		// V13: Track failed attempt
-		_ = h.AuthStore.IncrementFailedOTP(r.Context(), payload.Mobile)
 		response.Error(w, "Invalid OTP", http.StatusUnauthorized)
 		return
 	}
-
-	// V13: Reset failed attempts on success
-	_ = h.AuthStore.ResetFailedOTP(r.Context(), payload.Mobile)
 
 	user, err := h.AuthStore.FindUserByMobile(r.Context(), payload.Mobile)
 	if err != nil {
@@ -266,6 +295,16 @@ func (h *AuthHandler) HandleDriverRequestOTP(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// App Store review test number: fixed code accepted at verify, no SMS.
+	if h.isReviewNumber(payload.Mobile) {
+		var name string
+		if existingDriver, _ := h.AuthStore.FindDriverByMobile(r.Context(), payload.Mobile); existingDriver != nil {
+			name = existingDriver.Name
+		}
+		response.Success(w, http.StatusOK, map[string]string{"detail": "OTP sent", "name": name})
+		return
+	}
+
 	locked, err := h.AuthStore.IsOTPLocked(r.Context(), payload.Mobile)
 	if err != nil {
 		response.Error(w, "Internal error", http.StatusInternalServerError)
@@ -317,23 +356,32 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	locked, err := h.AuthStore.IsOTPLocked(r.Context(), payload.Mobile)
-	if err != nil {
-		response.Error(w, "Internal error", http.StatusInternalServerError)
-		return
-	}
-	if locked {
-		response.Error(w, "Too many attempts. Try again later.", http.StatusTooManyRequests)
-		return
-	}
+	var valid bool
+	if h.isReviewNumber(payload.Mobile) {
+		valid = payload.OTP == h.ReviewOTPCode
+	} else {
+		locked, err := h.AuthStore.IsOTPLocked(r.Context(), payload.Mobile)
+		if err != nil {
+			response.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
+		if locked {
+			response.Error(w, "Too many attempts. Try again later.", http.StatusTooManyRequests)
+			return
+		}
 
-	valid, err := h.AuthStore.VerifyOTP(r.Context(), payload.Mobile, payload.OTP)
-	if err != nil || !valid {
-		_ = h.AuthStore.IncrementFailedOTP(r.Context(), payload.Mobile)
+		valid, err = h.AuthStore.VerifyOTP(r.Context(), payload.Mobile, payload.OTP)
+		if err != nil || !valid {
+			_ = h.AuthStore.IncrementFailedOTP(r.Context(), payload.Mobile)
+			response.Error(w, "Invalid OTP", http.StatusUnauthorized)
+			return
+		}
+		_ = h.AuthStore.ResetFailedOTP(r.Context(), payload.Mobile)
+	}
+	if !valid {
 		response.Error(w, "Invalid OTP", http.StatusUnauthorized)
 		return
 	}
-	_ = h.AuthStore.ResetFailedOTP(r.Context(), payload.Mobile)
 
 	driver, err := h.AuthStore.FindDriverByMobile(r.Context(), payload.Mobile)
 	if err != nil {

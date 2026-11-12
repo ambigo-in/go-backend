@@ -182,6 +182,10 @@ func main() {
 
 	authHandler := handlers.NewAuthHandler(authStore, eventBus, appConfig.JWTSecret, smsCfg, appConfig.AllowStaleRefreshChain, referralService)
 	authHandler.SetMDStore(adminStore)
+	authHandler.SetReviewOTP(appConfig.ReviewOTPNumbers, appConfig.ReviewOTPCode)
+	if len(appConfig.ReviewOTPNumbers) > 0 {
+		logger.Log.Warn().Int("review_numbers", len(appConfig.ReviewOTPNumbers)).Msg("APP_REVIEW_OTP_NUMBERS is set: fixed-OTP review login active for whitelisted numbers (no SMS)")
+	}
 	profileHandler := handlers.NewProfileHandler(authStore)
 	profileHandler.SetAdminStore(adminStore)
 	verificationHandler := handlers.NewVerificationHandler(authStore, storageService)
@@ -189,6 +193,7 @@ func main() {
 	paymentHandler := handlers.NewPaymentHandler(paymentStore, eventBus, rzpService, walletStore, appConfig.RazorpayWebhookSecret)
 	resendMailer := mailer.NewResendMailer(appConfig)
 	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore, hospitalCityStore, pendingHospitalStore, counterStore, rideStore, appConfig.JWTSecret, smsCfg, resendMailer)
+	adminHandler.SetReviewOTP(appConfig.ReviewOTPNumbers, appConfig.ReviewOTPCode)
 	hospitalAuthHandler := handlers.NewHospitalAuthHandler(authStore, pendingHospitalStore, hospitalStore, appConfig.JWTSecret, smsCfg)
 	receptionistHandler := handlers.NewHospitalReceptionistHandler(authStore, appConfig.JWTSecret, resendMailer)
 	attendantAuthHandler := handlers.NewAttendantAuthHandler(authStore, appConfig.JWTSecret, smsCfg, eventBus)

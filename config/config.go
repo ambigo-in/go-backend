@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"ambigo-backend/internal/logger"
@@ -52,6 +53,11 @@ type AppConfig struct {
 	// product is not yet approved. drivers.wallet_verified is left untouched
 	// so turning this off re-arms the gate with no data cleanup.
 	BankVerificationBypass bool
+
+	// App Store review login: whitelisted test numbers accept a fixed OTP
+	// code and receive no SMS. Empty number list disables the feature.
+	ReviewOTPNumbers map[string]bool
+	ReviewOTPCode    string
 
 	// Cloudshope (Call Masking)
 	CloudshopeToken      string
@@ -130,6 +136,8 @@ func LoadConfig() *AppConfig {
 		ZwitchWebhookSecret: os.Getenv("ZWITCH_WEBHOOK_SECRET"),
 		WithdrawalFee:     envFloatOrDefault("WITHDRAWAL_FEE", 7),
 		BankVerificationBypass: os.Getenv("BANK_VERIFICATION_BYPASS") == "true",
+		ReviewOTPNumbers:       parseReviewNumbers(os.Getenv("APP_REVIEW_OTP_NUMBERS")),
+		ReviewOTPCode:          envOrDefault("APP_REVIEW_OTP_CODE", "123456"),
 
 		CloudshopeToken:      os.Getenv("CLOUDSHOPE_TOKEN"),
 		CloudshopeNumber:     os.Getenv("CLOUDSHOPE_NUMBER"),
@@ -159,6 +167,16 @@ func LoadConfig() *AppConfig {
 	}
 
 	return cfg
+}
+
+func parseReviewNumbers(csv string) map[string]bool {
+	numbers := make(map[string]bool)
+	for _, n := range strings.Split(csv, ",") {
+		if n = strings.TrimSpace(n); n != "" {
+			numbers[n] = true
+		}
+	}
+	return numbers
 }
 
 func envOrDefault(key, fallback string) string {

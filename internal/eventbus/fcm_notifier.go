@@ -30,6 +30,9 @@ func (n *FCMNotifier) SetAdminStore(adminStore *admin.Store) {
 
 const fcmWorkerPoolSize = 10
 
+// Each handler picks a visible send (iOS draws the banner, so a locked or
+// killed screen still shows it) or a silent one (iOS only wakes the app to act
+// on the payload). See notification.SendVisibleDataMessage.
 func (n *FCMNotifier) SubscribeTo(bus *InMemoryBus) {
 	n.subscribeWithPool(bus, ChannelRideDriverOffered, n.handleRideOffered)
 	n.subscribeWithPool(bus, ChannelRideWithdrawn, n.handleRideWithdrawn)
@@ -131,7 +134,7 @@ func (n *FCMNotifier) handleRideOffered(payload []byte) {
 		data["is_sos"] = "false"
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		ll.Error().Err(err).Str("driver_id", p.DriverID).Msg("FCM push failed for driver")
 	}
 }
@@ -193,7 +196,7 @@ func (n *FCMNotifier) handleRideAccepted(payload []byte) {
 		"body":      "Your driver is on the way to your pickup point.",
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Ride accepted FCM push failed for user")
 	}
 }
@@ -225,7 +228,7 @@ func (n *FCMNotifier) handleRideArrived(payload []byte) {
 		"body":    "Your driver has reached the pickup point.",
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Ride arrived FCM push failed for user")
 	}
 }
@@ -257,7 +260,7 @@ func (n *FCMNotifier) handleRideStarted(payload []byte) {
 		"body":    "Your ride has started. Have a safe ride!",
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Ride started FCM push failed for user")
 	}
 }
@@ -301,7 +304,7 @@ func (n *FCMNotifier) handleRideDestinationChanged(payload []byte) {
 		"body":          body,
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Destination changed FCM push failed for user")
 	}
 
@@ -314,7 +317,7 @@ func (n *FCMNotifier) handleRideDestinationChanged(payload []byte) {
 	if dErr != nil || dToken == nil || *dToken == "" {
 		return
 	}
-	if err := n.fcmClient.SendDataMessage(ctx, *dToken, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *dToken, data); err != nil {
 		logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Destination changed FCM push failed for driver")
 	}
 }
@@ -383,7 +386,7 @@ func (n *FCMNotifier) handleRideCancelled(payload []byte) {
 			"title":   "Driver cancelled the ride",
 			"body":    "We are finding you another ride, please wait.",
 		}
-		if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+		if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 			logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Ride cancelled FCM push failed for user")
 		}
 	case "user_cancelled":
@@ -400,7 +403,7 @@ func (n *FCMNotifier) handleRideCancelled(payload []byte) {
 			"title":   "Ride cancelled by user",
 			"body":    "The rider has cancelled the ride.",
 		}
-		if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+		if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 			logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Ride cancelled FCM push failed for driver")
 		}
 	case "no_drivers", "all_drivers_exhausted":
@@ -417,7 +420,7 @@ func (n *FCMNotifier) handleRideCancelled(payload []byte) {
 			"title":   "No drivers found",
 			"body":    "No drivers available right now. Please try again in a few minutes.",
 		}
-		if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+		if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 			logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("No drivers FCM push failed for user")
 		}
 	}
@@ -538,7 +541,7 @@ func (n *FCMNotifier) handleReferralCredited(payload []byte) {
 		"body":  body,
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("recipient_id", p.RecipientID).Msg("Referral FCM push failed")
 	}
 }
@@ -569,7 +572,7 @@ func (n *FCMNotifier) handleSafetyStoppedWarn(payload []byte) {
 		"title":           "Are you stopped?",
 		"body":            fmt.Sprintf("Stopped %d min on trip #%s — tap OK if all good.", p.StoppedMinutes, p.RideRef),
 	}
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Stopped-warning FCM push failed for driver")
 	}
 }
@@ -620,13 +623,13 @@ func (n *FCMNotifier) handleSafetyStoppedAlarm(payload []byte) {
 	}
 
 	if token, err := n.authStore.GetDriverFCMToken(ctx, p.DriverID); err == nil && token != nil && *token != "" {
-		if err := n.fcmClient.SendDataMessage(ctx, *token, base); err != nil {
+		if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, base); err != nil {
 			logger.Log.Error().Err(err).Str("driver_id", p.DriverID).Msg("Stopped-emergency FCM push failed for driver")
 		}
 	}
 	if p.UserID != "" {
 		if token, err := n.authStore.GetUserFCMToken(ctx, p.UserID); err == nil && token != nil && *token != "" {
-			if err := n.fcmClient.SendDataMessage(ctx, *token, base); err != nil {
+			if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, base); err != nil {
 				logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Stopped-emergency FCM push failed for user")
 			}
 		}

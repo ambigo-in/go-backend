@@ -37,6 +37,8 @@ type AdminHandler struct {
 	JWTSecret            string
 	SMSCfg               auth.SMSCountryConfig
 	Mailer               *mailer.ResendMailer
+	ReviewOTPNumbers     map[string]bool
+	ReviewOTPCode        string
 }
 
 func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventbus.InMemoryBus, hStore *admin.HospitalStore, hcStore *admin.HospitalCityStore, pStore *admin.PendingHospitalStore, cStore *admin.CounterStore, rStore *ride.Store, jwtSecret string, smsCfg auth.SMSCountryConfig, mailer *mailer.ResendMailer) *AdminHandler {
@@ -59,6 +61,16 @@ func NewAdminHandler(store *admin.Store, authStore *auth.Store, eventBus *eventb
 // Kept as a setter so the long constructor signature stays untouched.
 func (h *AdminHandler) SetWalletStore(s *payment.WalletStore) {
 	h.WalletStore = s
+}
+
+// SetReviewOTP enables fixed-code login for App Store review test numbers.
+func (h *AdminHandler) SetReviewOTP(numbers map[string]bool, code string) {
+	h.ReviewOTPNumbers = numbers
+	h.ReviewOTPCode = code
+}
+
+func (h *AdminHandler) isReviewNumber(mobile string) bool {
+	return h.ReviewOTPNumbers[mobile]
 }
 
 func (h *AdminHandler) HandleAdminLogin(w http.ResponseWriter, r *http.Request) {
@@ -132,6 +144,12 @@ func (h *AdminHandler) HandleAdminMobileRequestOTP(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// App Store review test number: fixed code accepted at verify, no SMS.
+	if h.isReviewNumber(req.Mobile) {
+		json.NewEncoder(w).Encode(map[string]string{"detail": "OTP sent", "name": adminUser.Name})
+		return
+	}
+
 	otp, err := h.AuthStore.GenerateAndStoreOTP(r.Context(), req.Mobile)
 	if err != nil {
 		response.Error(w, "Failed to generate OTP", http.StatusInternalServerError)
@@ -156,10 +174,16 @@ func (h *AdminHandler) HandleAdminMobileVerifyOTP(w http.ResponseWriter, r *http
 		return
 	}
 
-	valid, err := h.AuthStore.VerifyOTP(r.Context(), req.Mobile, req.OTP)
-	if err != nil {
-		response.Error(w, "Internal error", http.StatusInternalServerError)
-		return
+	var valid bool
+	if h.isReviewNumber(req.Mobile) {
+		valid = req.OTP == h.ReviewOTPCode
+	} else {
+		var err error
+		valid, err = h.AuthStore.VerifyOTP(r.Context(), req.Mobile, req.OTP)
+		if err != nil {
+			response.Error(w, "Internal error", http.StatusInternalServerError)
+			return
+		}
 	}
 	if !valid {
 		response.Error(w, "Invalid OTP", http.StatusUnauthorized)
