@@ -3,18 +3,21 @@ package location
 import (
 	"ambigo-backend/interfaces"
 	"errors"
+	"sort"
 	"sync"
 	"time"
 )
 
 type DriverLocation struct {
-	DriverID    string
-	Lat         float64
-	Lng         float64
-	H3Cell      string
-	Status      interfaces.DriverStatus
-	LastUpdated time.Time
-	VehicleType string
+	DriverID    string                  `json:"driver_id"`
+	DriverName  string                  `json:"driver_name,omitempty"`
+	Lat         float64                 `json:"lat"`
+	Lng         float64                 `json:"lng"`
+	H3Cell      string                  `json:"-"`
+	Status      interfaces.DriverStatus `json:"status"`
+	LastUpdated time.Time               `json:"last_updated"`
+	VehicleType string                  `json:"vehicle_type,omitempty"`
+	RideID      string                  `json:"ride_id,omitempty"`
 }
 
 // MemoryStore implements interfaces.LocationStore using sync.RWMutex
@@ -132,6 +135,24 @@ func (s *MemoryStore) RemoveDriver(driverID string) error {
 	return nil
 }
 
+func (s *MemoryStore) OnlineCounts() (available, busy int) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	now := time.Now()
+	for _, d := range s.drivers {
+		if now.Sub(d.LastUpdated) > 15*time.Second {
+			continue
+		}
+		switch d.Status {
+		case interfaces.StatusAvailable:
+			available++
+		case interfaces.StatusBusy:
+			busy++
+		}
+	}
+	return available, busy
+}
+
 func (s *MemoryStore) SetDriverStatus(driverID string, status interfaces.DriverStatus) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -180,4 +201,58 @@ func (s *MemoryStore) GetDriverVehicleType(driverID string) (string, error) {
 	}
 
 	return driver.VehicleType, nil
+}
+
+func (s *MemoryStore) SetDriverIdentity(driverID, name, vehicleType string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	driver, exists := s.drivers[driverID]
+	if !exists {
+		return errors.New("driver not found")
+	}
+
+	driver.DriverName = name
+	driver.VehicleType = vehicleType
+	return nil
+}
+
+func (s *MemoryStore) SetDriverRide(driverID, rideID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	driver, exists := s.drivers[driverID]
+	if !exists {
+		return errors.New("driver not found")
+	}
+	driver.RideID = rideID
+	return nil
+}
+
+func (s *MemoryStore) FleetDriver(driverID string) (DriverLocation, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	driver, exists := s.drivers[driverID]
+	if !exists || time.Since(driver.LastUpdated) > 15*time.Second {
+		return DriverLocation{}, false
+	}
+	return *driver, true
+}
+
+func (s *MemoryStore) FleetSnapshot() []DriverLocation {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	now := time.Now()
+	drivers := make([]DriverLocation, 0, len(s.drivers))
+	for _, driver := range s.drivers {
+		if now.Sub(driver.LastUpdated) <= 15*time.Second {
+			drivers = append(drivers, *driver)
+		}
+	}
+	sort.Slice(drivers, func(i, j int) bool {
+		return drivers[i].DriverID < drivers[j].DriverID
+	})
+	return drivers
 }

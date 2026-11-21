@@ -67,50 +67,99 @@ func NewTrackerWithThresholds(warnAfter, escalateAfter time.Duration, moveThresh
 	}
 }
 
-// Reset clears state for a driver (ride ended, ride changed, or ineligible).
-func (t *Tracker) Reset(driverID string) {
-	if t == nil || driverID == "" {
+func (t *Tracker) Restore(states []VehicleState) {
+	if t == nil {
 		return
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	delete(t.states, driverID)
+	for _, persisted := range states {
+		if persisted.DriverID == "" || persisted.RideID == "" || persisted.StoppedSince.IsZero() {
+			continue
+		}
+		t.states[persisted.DriverID] = &state{
+			rideID: persisted.RideID, anchorLat: persisted.AnchorLat, anchorLng: persisted.AnchorLng,
+			anchorTime: persisted.StoppedSince, warned: persisted.Warned, escalated: persisted.Escalated,
+		}
+	}
 }
 
-// Check records a ping and reports which stage (if any) should fire.
-// Movement beyond the threshold resets the anchor and warn flag (one warn
-// per continuous stop), while escalated sticks for the ride lifetime.
+func (t *Tracker) Reset(driverID string) {
+	t.ResetState(driverID)
+}
+
+func (t *Tracker) ResetState(driverID string) bool {
+	if t == nil || driverID == "" {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, exists := t.states[driverID]; !exists {
+		return false
+	}
+	delete(t.states, driverID)
+	return true
+}
+
+func (t *Tracker) Snapshot(driverID string, now time.Time) (VehicleState, bool) {
+	if t == nil || driverID == "" {
+		return VehicleState{}, false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	st, exists := t.states[driverID]
+	if !exists {
+		return VehicleState{}, false
+	}
+	return stateSnapshot(driverID, st, now), true
+}
+
 func (t *Tracker) Check(driverID, rideID string, lat, lng float64, now time.Time) (Action, time.Duration) {
+	action, elapsed, _, _ := t.CheckState(driverID, rideID, lat, lng, now)
+	return action, elapsed
+}
+
+func (t *Tracker) CheckState(driverID, rideID string, lat, lng float64, now time.Time) (Action, time.Duration, VehicleState, bool) {
 	if t == nil || driverID == "" || rideID == "" {
-		return ActionNone, 0
+		return ActionNone, 0, VehicleState{}, false
 	}
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	st, ok := t.states[driverID]
 	if !ok || st.rideID != rideID {
-		t.states[driverID] = &state{rideID: rideID, anchorLat: lat, anchorLng: lng, anchorTime: now}
-		return ActionNone, 0
+		st = &state{rideID: rideID, anchorLat: lat, anchorLng: lng, anchorTime: now}
+		t.states[driverID] = st
+		return ActionNone, 0, stateSnapshot(driverID, st, now), true
 	}
 	if st.escalated {
-		return ActionNone, 0
+		return ActionNone, now.Sub(st.anchorTime), stateSnapshot(driverID, st, now), false
 	}
 	if HaversineMeters(st.anchorLat, st.anchorLng, lat, lng) > t.moveThreshold {
 		st.anchorLat, st.anchorLng, st.anchorTime = lat, lng, now
 		st.warned = false
-		return ActionNone, 0
+		return ActionNone, 0, stateSnapshot(driverID, st, now), true
 	}
 	elapsed := now.Sub(st.anchorTime)
 	if !st.warned {
 		if elapsed >= t.warnAfter {
 			st.warned = true
-			return ActionWarn, elapsed
+			return ActionWarn, elapsed, stateSnapshot(driverID, st, now), true
 		}
-		return ActionNone, 0
+		return ActionNone, elapsed, stateSnapshot(driverID, st, now), false
 	}
 	if elapsed >= t.escalateAfter {
 		st.escalated = true
-		return ActionEscalate, elapsed
+		return ActionEscalate, elapsed, stateSnapshot(driverID, st, now), true
 	}
-	return ActionNone, 0
+	return ActionNone, elapsed, stateSnapshot(driverID, st, now), false
+}
+
+func stateSnapshot(driverID string, st *state, now time.Time) VehicleState {
+	return VehicleState{
+		RideID: st.rideID, DriverID: driverID,
+		AnchorLat: st.anchorLat, AnchorLng: st.anchorLng,
+		StoppedSince: st.anchorTime, Warned: st.warned, Escalated: st.escalated,
+		UpdatedAt: now,
+	}
 }

@@ -22,11 +22,3 @@ func Ctx(ctx context.Context) zerolog.Logger {
 	}
 	return l.Logger()
 }
-
-func NewRideLogger(rideID string) zerolog.Logger {
-	return Log.With().Str("ride_id", rideID).Logger()
-}
-
-func NewUserLogger(userID string) zerolog.Logger {
-	return Log.With().Str("user_id", userID).Logger()
-}

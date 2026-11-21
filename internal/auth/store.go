@@ -59,7 +59,7 @@ func scanUserRow(row pgx.Row) (*User, error) {
 	var locationData []byte
 	var fcmToken, jwtToken *string
 	var id string
-	err := row.Scan(&id, &u.Name, &u.Mobile, &u.ReferralCode, &myReferralCode, &locationData, &fcmToken, &jwtToken)
+	err := row.Scan(&id, &u.Name, &u.Mobile, &u.ReferralCode, &myReferralCode, &locationData, &fcmToken, &jwtToken, &u.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -730,7 +730,7 @@ func IsValidIndianMobile(mobile string) bool {
 // ---- Existing methods below ----
 
 func (s *Store) FindUserByMobile(ctx context.Context, mobile string) (*User, error) {
-	row := s.pool.QueryRow(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token FROM users WHERE mobile=$1`, mobile)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token, created_at FROM users WHERE mobile=$1`, mobile)
 	u, err := scanUserRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -815,7 +815,7 @@ func (s *Store) FindUserByID(ctx context.Context, id string) (*User, error) {
 	if !ids.IsValid(id) {
 		return nil, fmt.Errorf("invalid id: %s", id)
 	}
-	row := s.pool.QueryRow(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token FROM users WHERE id=$1::uuid`, id)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token, created_at FROM users WHERE id=$1::uuid`, id)
 	u, err := scanUserRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1294,7 +1294,7 @@ func (s *Store) ListUsersWithOffset(ctx context.Context, limit int, offset int) 
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token FROM users ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`, limit, offset)
+	rows, err := s.pool.Query(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token, created_at FROM users ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1306,7 +1306,7 @@ func (s *Store) ListUsersWithOffset(ctx context.Context, limit int, offset int) 
 		var locationData []byte
 		var fcmToken, jwtToken *string
 		var id string
-		if err := rows.Scan(&id, &u.Name, &u.Mobile, &u.ReferralCode, &myReferralCode, &locationData, &fcmToken, &jwtToken); err != nil {
+		if err := rows.Scan(&id, &u.Name, &u.Mobile, &u.ReferralCode, &myReferralCode, &locationData, &fcmToken, &jwtToken, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		u.ID = id
@@ -1336,9 +1336,9 @@ func (s *Store) ListUsersPaginated(ctx context.Context, limit int, cursor string
 	var rows pgx.Rows
 	var err error
 	if cursor != "" && ids.IsValid(cursor) {
-		rows, err = s.pool.Query(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token FROM users WHERE (created_at, id) < ((SELECT created_at FROM users WHERE id=$2::uuid), $2::uuid) ORDER BY created_at DESC, id DESC LIMIT $1`, limit, cursor)
+		rows, err = s.pool.Query(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token, created_at FROM users WHERE (created_at, id) < ((SELECT created_at FROM users WHERE id=$2::uuid), $2::uuid) ORDER BY created_at DESC, id DESC LIMIT $1`, limit, cursor)
 	} else {
-		rows, err = s.pool.Query(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token FROM users ORDER BY created_at DESC, id DESC LIMIT $1`, limit)
+		rows, err = s.pool.Query(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token, created_at FROM users ORDER BY created_at DESC, id DESC LIMIT $1`, limit)
 	}
 	if err != nil {
 		return nil, err
@@ -1351,7 +1351,7 @@ func (s *Store) ListUsersPaginated(ctx context.Context, limit int, cursor string
 		var locationData []byte
 		var fcmToken, jwtToken *string
 		var id string
-		if err := rows.Scan(&id, &u.Name, &u.Mobile, &u.ReferralCode, &myReferralCode, &locationData, &fcmToken, &jwtToken); err != nil {
+		if err := rows.Scan(&id, &u.Name, &u.Mobile, &u.ReferralCode, &myReferralCode, &locationData, &fcmToken, &jwtToken, &u.CreatedAt); err != nil {
 			return nil, err
 		}
 		u.ID = id
@@ -1401,7 +1401,7 @@ func (s *Store) SetDriverReferralCode(ctx context.Context, driverID string, code
 }
 
 func (s *Store) FindUserByReferralCode(ctx context.Context, code string) (*User, error) {
-	row := s.pool.QueryRow(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token FROM users WHERE my_referral_code=$1`, code)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, name, mobile, referral_code, my_referral_code, location, fcm_token, jwt_token, created_at FROM users WHERE my_referral_code=$1`, code)
 	u, err := scanUserRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

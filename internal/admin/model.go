@@ -1,13 +1,31 @@
 package admin
 
+import "time"
+
 type Admin struct {
-	ID             string `db:"id" json:"_id"`
-	Username       string `db:"username" json:"username"`
-	HashedPassword string `db:"hashed_password" json:"-"`
-	Name           string `db:"name" json:"name"`
-	Role           string `db:"role" json:"role"`
-	Active         bool   `db:"active" json:"active"`
-	Mobile         string `db:"mobile" json:"mobile,omitempty"`
+	ID             string    `db:"id" json:"_id"`
+	Username       string    `db:"username" json:"username"`
+	HashedPassword string    `db:"hashed_password" json:"-"`
+	Name           string    `db:"name" json:"name"`
+	Role           string    `db:"role" json:"role"`
+	Active         bool      `db:"active" json:"active"`
+	Mobile         string    `db:"mobile" json:"mobile,omitempty"`
+	CreatedAt      time.Time `db:"created_at" json:"created_at,omitempty"`
+	UpdatedAt      time.Time `db:"updated_at" json:"updated_at,omitempty"`
+}
+
+type AdminStaff struct {
+	ID        string    `db:"id" json:"id"`
+	IDAlias   string    `json:"_id"`
+	Username  string    `db:"username" json:"username"`
+	Email     string    `json:"email"`
+	Name      string    `db:"name" json:"name"`
+	Role      string    `db:"role" json:"role"`
+	Active    bool      `db:"active" json:"active"`
+	Status    string    `json:"status"`
+	Mobile    string    `db:"mobile" json:"mobile,omitempty"`
+	CreatedAt time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type PricingTier struct {

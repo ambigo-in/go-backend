@@ -20,6 +20,8 @@ import (
 	"ambigo-backend/api/middleware"
 	"ambigo-backend/config"
 	"ambigo-backend/internal/admin"
+	"ambigo-backend/internal/adminstats"
+	"ambigo-backend/internal/analytics"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/dispatch"
 	"ambigo-backend/internal/eventbus"
@@ -33,6 +35,7 @@ import (
 	"ambigo-backend/internal/pricing"
 	"ambigo-backend/internal/referral"
 	"ambigo-backend/internal/ride"
+	"ambigo-backend/internal/safety"
 	"ambigo-backend/internal/storage"
 	"ambigo-backend/internal/telephony"
 	"ambigo-backend/internal/translation"
@@ -121,6 +124,9 @@ func main() {
 	walletStore := payment.NewWalletStore(pool)
 	feedbackStore := ride.NewFeedbackStore(pool)
 	referralStore := referral.NewStore(pool)
+	safetyAlertStore := safety.NewAlertStore(pool)
+	safetyStateStore := safety.NewStateStore(pool)
+	auditStore := admin.NewAuditStore(pool)
 
 	// Initialize Services & Dispatcher
 	referralService := referral.NewService(referralStore, authStore, offerStore, walletStore, eventBus)
@@ -151,10 +157,27 @@ func main() {
 		ambTypeNames[t.ID] = t.Name
 	}
 	matcher := dispatch.NewMatcher(locationStore, routeClient, ambTypeNames)
+	matcher.RadiusKm = appConfig.DispatchRadiusKm
 	matcher.SetHospitalDeps(adminStore, authStore)
 	dispatcher := dispatch.NewDispatcher(matcher, rideStore, eventBus, wsManager)
+	dispatcher.MaxCandidates = appConfig.DispatchMaxCandidates
+	dispatcher.RadiusKm = appConfig.DispatchRadiusKm
 	dispatcher.StartStaleRideCleanup()
-	wsManager.SetSafetyDeps(rideStore, adminStore, ambTypeNames)
+	wsManager.SetSafetyDeps(rideStore, adminStore, ambTypeNames, safetyStateStore)
+	seedCtx, seedCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	activeRides, activeErr := rideStore.ListActiveDriverRides(seedCtx)
+	if activeErr != nil {
+		logger.Log.Error().Err(activeErr).Msg("Failed to restore active ride tracking")
+	} else {
+		wsManager.SeedActiveRides(activeRides)
+	}
+	safetyStates, safetyErr := safetyStateStore.ListActive(seedCtx)
+	if safetyErr != nil {
+		logger.Log.Error().Err(safetyErr).Msg("Failed to restore stopped-vehicle tracking")
+	} else {
+		wsManager.SeedSafetyStates(safetyStates)
+	}
+	seedCancel()
 
 	// Set Google Translate API URL (used by package-level var)
 	translation.TranslateAPIURL = appConfig.GoogleTranslateAPIURL
@@ -194,6 +217,22 @@ func main() {
 	resendMailer := mailer.NewResendMailer(appConfig)
 	adminHandler := handlers.NewAdminHandler(adminStore, authStore, eventBus, hospitalStore, hospitalCityStore, pendingHospitalStore, counterStore, rideStore, appConfig.JWTSecret, smsCfg, resendMailer)
 	adminHandler.SetReviewOTP(appConfig.ReviewOTPNumbers, appConfig.ReviewOTPCode)
+	adminStatsHandler := &handlers.AdminStatsHandler{Store: adminstats.NewStore(pool), LocationStore: locationStore, AuditStore: auditStore}
+	adminSafetyHandler := &handlers.AdminSafetyHandler{Store: safetyAlertStore, WSManager: wsManager}
+	adminFinanceHandler := &handlers.AdminFinanceHandler{
+		PaymentStore: paymentStore,
+		WalletStore:  walletStore,
+		AuthStore:    authStore,
+		Pool:         pool,
+	}
+	adminAuditHandler := &handlers.AdminAuditHandler{
+		AuditStore: auditStore,
+	}
+	adminLiveRideHandler := &handlers.AdminLiveRideHandler{
+		RideStore: rideStore, AuthStore: authStore, AdminStore: adminStore,
+		HospitalStore: hospitalStore, AlertStore: safetyAlertStore, AuditStore: auditStore,
+		SafetyStateStore: safetyStateStore, LocationStore: locationStore,
+	}
 	hospitalAuthHandler := handlers.NewHospitalAuthHandler(authStore, pendingHospitalStore, hospitalStore, appConfig.JWTSecret, smsCfg)
 	receptionistHandler := handlers.NewHospitalReceptionistHandler(authStore, appConfig.JWTSecret, resendMailer)
 	attendantAuthHandler := handlers.NewAttendantAuthHandler(authStore, appConfig.JWTSecret, smsCfg, eventBus)
@@ -212,12 +251,9 @@ func main() {
 	// Settle stuck withdrawals: every 5m, resolve 'pending' rows older than 15m.
 	walletHandler.StartPendingSweeper(5*time.Minute, 15*time.Minute)
 	adminHandler.SetWalletStore(walletStore)
-	feedbackHandler := handlers.NewFeedbackHandler(feedbackStore)
+	feedbackHandler := handlers.NewFeedbackHandler(feedbackStore, authStore)
 	referralHandler := handlers.NewReferralHandler(referralStore, referralService)
 	mdAmbulanceHandler := handlers.NewMDAmbulanceHandler(adminStore, authStore, eventBus)
-
-	// V16: Audit persistence (Postgres, TTL 30d via periodic DELETE)
-	auditStore := admin.NewAuditStore(pool)
 
 	// Subscribe EventBus Subscribers
 	websocket.NewWSNotifier(wsManager).SubscribeTo(eventBus)
@@ -227,7 +263,25 @@ func main() {
 	eventbus.NewMetricsCollector().SubscribeTo(eventBus)
 	eventbus.NewCacheInvalidator(counterStore).SubscribeTo(eventBus)
 	eventbus.NewAuditLogger(auditStore).SubscribeTo(eventBus)
+	safety.NewAlertRecorder(safetyAlertStore, func() {
+		wsManager.BroadcastToRole("admin", websocket.EventSafetyAlertUpdated, map[string]bool{"refresh": true})
+	}).SubscribeTo(eventBus)
 	eventbus.NewAnalyticsTracker().SubscribeTo(eventBus)
+
+	// Analytics shipper (Axiom today; BigQuery next) — enabled by a token.
+	// The Sink interface keeps provider swaps to one new file + config.
+	if appConfig.AxiomAPIToken != "" {
+		axiomSink := analytics.NewAxiomSink(appConfig.AxiomAPIToken, appConfig.AxiomDataset, appConfig.AxiomAPIBaseURL)
+		if err := axiomSink.EnsureDataset(context.Background()); err != nil {
+			log.Warn().Err(err).Msg("Axiom: ensure dataset failed (ingest will retry; metrics/logs will show errors until it exists)")
+		}
+		analyticsShipper := analytics.NewShipper(eventBus, axiomSink)
+		analyticsShipper.Start()
+		defer analyticsShipper.Stop()
+		log.Info().Str("dataset", appConfig.AxiomDataset).Msg("Analytics shipper started (axiom)")
+	} else {
+		log.Warn().Msg("AXIOM_API_TOKEN not set — analytics shipper disabled")
+	}
 
 	// Middlewares
 	var jwtOpts []jwt.ParserOption
@@ -241,11 +295,17 @@ func main() {
 	requireUser := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("user", next)) }
 	requireDriver := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("driver", next)) }
 	requireUnvrfDriver := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("unvrf_driver", next)) }
-	requireDriverOrUnvrf := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireAnyRole([]string{"driver", "unvrf_driver"}, next)) }
+	requireDriverOrUnvrf := func(next http.HandlerFunc) http.Handler {
+		return jwtAuth(middleware.RequireAnyRole([]string{"driver", "unvrf_driver"}, next))
+	}
 	requireAdmin := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("admin", next)) }
 	requireHospitalMD := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("hospital_md", next)) }
-	requireAnyHospital := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireAnyRole([]string{"hospital_md", "hospital_receptionist"}, next)) }
-	requireUserOrAttendant := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireAnyRole([]string{"user", "attendant"}, next)) }
+	requireAnyHospital := func(next http.HandlerFunc) http.Handler {
+		return jwtAuth(middleware.RequireAnyRole([]string{"hospital_md", "hospital_receptionist"}, next))
+	}
+	requireUserOrAttendant := func(next http.HandlerFunc) http.Handler {
+		return jwtAuth(middleware.RequireAnyRole([]string{"user", "attendant"}, next))
+	}
 	requireAttendant := func(next http.HandlerFunc) http.Handler { return jwtAuth(middleware.RequireRole("attendant", next)) }
 	// A6: Admin sub-role enforcement (backward compat — empty role = full access)
 	adminAllowedRoles := []string{"super_admin", "admin", ""}
@@ -350,12 +410,12 @@ func main() {
 			"status":  overall,
 			"version": "v2-pg",
 			"checks": map[string]interface{}{
-				"postgres":           postgresOK,
-				"googleap":           googleOK,
-				"pool_total_conns":   stat.TotalConns(),
-				"pool_acquired_conns": stat.AcquiredConns(),
-				"pool_idle_conns":    stat.IdleConns(),
-				"pool_max_conns":     stat.MaxConns(),
+				"postgres":                postgresOK,
+				"googleap":                googleOK,
+				"pool_total_conns":        stat.TotalConns(),
+				"pool_acquired_conns":     stat.AcquiredConns(),
+				"pool_idle_conns":         stat.IdleConns(),
+				"pool_max_conns":          stat.MaxConns(),
 				"pool_constructing_conns": fmt.Sprintf("%d", stat.ConstructingConns()),
 			},
 		})
@@ -446,6 +506,13 @@ func main() {
 	// Admin Endpoints (Protected)
 	// V7: Rate limit admin login (username/password — IP-based)
 	mux.HandleFunc("POST /api/v2/admin/login", middleware.RateLimit(adminHandler.HandleAdminLogin, adminLoginLimiter))
+	// Admin registration / signup (rate-limited by IP)
+	mux.HandleFunc("POST /api/v2/admin/register", middleware.RateLimit(adminHandler.HandleAdminRegister, adminLoginLimiter))
+	mux.HandleFunc("POST /api/v2/admin/signup", middleware.RateLimit(adminHandler.HandleAdminRegister, adminLoginLimiter))
+	// Current admin profile
+	mux.Handle("GET /api/v2/admin/me", requireAdmin(http.HandlerFunc(adminHandler.HandleAdminMe)))
+	mux.Handle("POST /api/v2/admin/me", requireAdmin(http.HandlerFunc(adminHandler.HandleAdminMe)))
+	mux.Handle("GET /api/admin/auth/me", requireAdmin(http.HandlerFunc(adminHandler.HandleAdminMe)))
 	// Admin OTP login: request IP-limited, verify mobile-limited
 	mux.HandleFunc("POST /api/v2/admin/login/mobile", middleware.RateLimit(adminHandler.HandleAdminMobileRequestOTP, otpIPLimiter))
 	mux.HandleFunc("POST /api/v2/admin/login/mobile/verify", middleware.RateLimitMobile(adminHandler.HandleAdminMobileVerifyOTP, verifyMobileLimiter))
@@ -489,6 +556,15 @@ func main() {
 	// Admin: User Rides
 	mux.Handle("POST /api/v2/admin/rides/user/list", requireAdmin(http.HandlerFunc(adminHandler.HandleUserRideList)))
 	// Admin: Ride Listing
+	mux.Handle("POST /api/v2/admin/dashboard/stats", requireAdmin(http.HandlerFunc(adminStatsHandler.HandleDashboardStats)))
+	mux.Handle("GET /api/v2/admin/fleet", requireAdmin(http.HandlerFunc(adminStatsHandler.HandleFleetSnapshot)))
+	mux.Handle("GET /api/v2/admin/activity", requireAdmin(http.HandlerFunc(adminStatsHandler.HandleActivity)))
+	mux.Handle("GET /api/v2/admin/rides/{id}/live", requireAdmin(http.HandlerFunc(adminLiveRideHandler.HandleGet)))
+	mux.Handle("GET /api/v2/admin/safety/alerts", requireAdmin(http.HandlerFunc(adminSafetyHandler.HandleList)))
+	mux.Handle("POST /api/v2/admin/safety/alerts/acknowledge", requireAdmin(http.HandlerFunc(adminSafetyHandler.HandleAcknowledge)))
+	mux.Handle("POST /api/v2/admin/safety/alerts/resolve", requireAdmin(http.HandlerFunc(adminSafetyHandler.HandleResolve)))
+	mux.Handle("POST /api/v2/admin/analytics/summary", requireAdmin(http.HandlerFunc(adminStatsHandler.HandleAnalyticsSummary)))
+	mux.Handle("POST /api/v2/admin/rides/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListRides)))
 	mux.Handle("POST /api/v2/admin/rides/completed/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListCompletedRides)))
 	mux.Handle("POST /api/v2/admin/rides/ongoing/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListOngoingRides)))
 	// Admin: Ambulance Type Update
@@ -561,6 +637,29 @@ func main() {
 	// Admin: Referral Config
 	mux.Handle("GET /api/v2/admin/referral/config", requireAdmin(http.HandlerFunc(referralHandler.HandleGetConfig)))
 	mux.Handle("POST /api/v2/admin/referral/config", requireAdmin(http.HandlerFunc(referralHandler.HandleSaveConfig)))
+
+	// Admin: Staff & Roles (Co-Admin Management)
+	mux.Handle("GET /api/v2/admin/staff", requireAdmin(http.HandlerFunc(adminHandler.HandleListStaff)))
+	mux.Handle("POST /api/v2/admin/staff/list", requireAdmin(http.HandlerFunc(adminHandler.HandleListStaff)))
+	mux.Handle("POST /api/v2/admin/staff/create", requireAdminRole(adminAllowedRoles, adminHandler.HandleCreateStaff))
+	mux.Handle("POST /api/v2/admin/staff/update", requireAdminRole(adminAllowedRoles, adminHandler.HandleUpdateStaff))
+	mux.Handle("POST /api/v2/admin/staff/toggle", requireAdminRole(adminAllowedRoles, adminHandler.HandleToggleStaff))
+	mux.Handle("POST /api/v2/admin/staff/delete", requireAdminRole(adminAllowedRoles, adminHandler.HandleDeleteStaff))
+	// Legacy python compatibility
+	mux.Handle("GET /api/admin/co_admins", requireAdmin(http.HandlerFunc(adminHandler.HandleListStaff)))
+	mux.Handle("POST /api/admin/co_admins", requireAdminRole(adminAllowedRoles, adminHandler.HandleCreateStaff))
+	mux.Handle("POST /api/v2/admin/co_admins", requireAdminRole(adminAllowedRoles, adminHandler.HandleCreateStaff))
+
+	// Admin: Financial Ledger & Payments
+	mux.Handle("POST /api/v2/admin/finance/summary", requireAdmin(http.HandlerFunc(adminFinanceHandler.HandleFinanceSummary)))
+	mux.Handle("POST /api/v2/admin/ledger/transactions", requireAdmin(http.HandlerFunc(adminFinanceHandler.HandleListLedgerTransactions)))
+	mux.Handle("POST /api/v2/admin/payments/list", requireAdmin(http.HandlerFunc(adminFinanceHandler.HandleListAdminPayments)))
+
+	// Admin: Audit Log Read & Query Interface
+	mux.Handle("POST /api/v2/admin/audit-logs/list", requireAdmin(http.HandlerFunc(adminAuditHandler.HandleListAuditLogs)))
+	mux.Handle("POST /api/v2/admin/audit/summary", requireAdmin(http.HandlerFunc(adminAuditHandler.HandleAuditSummary)))
+	mux.Handle("GET /api/v2/admin/audit-logs/list", requireAdmin(http.HandlerFunc(adminAuditHandler.HandleLegacyAuditLogs)))
+	mux.Handle("GET /admin/audit-logs/list", requireAdmin(http.HandlerFunc(adminAuditHandler.HandleLegacyAuditLogs)))
 
 	// Housekeeping: audit_log TTL 30d + auth_otp 5m cleanup (replaces Mongo TTL indexes)
 	// OTP rows expire after 5m — ticker must match (was 1h => 12x bloat of expired rows)

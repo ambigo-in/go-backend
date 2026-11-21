@@ -32,13 +32,13 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 		logger.Log.Error().Err(err).Str("driver_id", client.ID).Msg("Failed to update location store")
 	}
 
-	// Cache driver's vehicle type on first location ping (PG: IDs are UUID strings)
+	// Cache the identity fields used by dispatch and the admin fleet feed.
 	vType, err := m.LocStore.GetDriverVehicleType(client.ID)
 	if err != nil || vType == "" {
 		if ids.IsValid(client.ID) {
 			driver, lookupErr := m.AuthStore.FindDriverByID(context.Background(), client.ID)
 			if lookupErr == nil && driver != nil {
-				_ = m.LocStore.SetDriverVehicleType(client.ID, driver.VehicleType)
+				_ = m.LocStore.SetDriverIdentity(client.ID, driver.Name, driver.VehicleType)
 				vType = driver.VehicleType
 			}
 		}
@@ -46,18 +46,19 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 
 	m.mu.RLock()
 	rideID := m.activeDriverRide[client.ID]
+	rideStatus := m.activeDriverStatus[client.ID]
 	m.mu.RUnlock()
 
-	// If driver has an active ride but was recreated as AVAILABLE (e.g. after cleanup), fix the status
 	if rideID != "" {
 		currentStatus, _ := m.LocStore.GetDriverStatus(client.ID)
 		if currentStatus != "BUSY" {
-			m.LocStore.SetDriverStatus(client.ID, "BUSY")
+			_ = m.LocStore.SetDriverStatus(client.ID, "BUSY")
 		}
+		_ = m.LocStore.SetDriverRide(client.ID, rideID)
+	} else {
+		_ = m.LocStore.SetDriverRide(client.ID, "")
 	}
 
-	// Persist trail for gated re-rate (same-drop detour detection).
-	// Fire-and-forget: never block the WS read pump on DB.
 	if rideID != "" && m.RideStore != nil {
 		lat, lng := update.Lat, update.Lng
 		go func() {
@@ -67,19 +68,34 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 		}()
 	}
 
-	// Publish driver location event (subscriber handles onward relay to ride watchers).
-	// Throttled to 1 per driver per 3s: stale points are dropped, latest wins.
-	// The store above always stays fresh for dispatch; only the fan-out is capped.
-	if m.EventBus != nil && m.allowLocPublish(client.ID) {
-		m.EventBus.PublishEvent(eventbus.ChannelDriverLocationUpdate, eventbus.DriverLocationUpdatePayload{
-			DriverID: client.ID,
-			Lat:      update.Lat,
-			Lng:      update.Lng,
-			RideID:   rideID,
-		})
+	var stoppedSince, stoppedStage string
+	var stoppedSeconds int64
+	if rideStatus == ride.StatusInProgress {
+		if state := m.checkStoppedVehicle(client.ID, rideID, vType, update.Lat, update.Lng, time.Now(), client.SessionID); state != nil {
+			view := state.View(time.Now())
+			stoppedSince = view.StoppedSince.UTC().Format(time.RFC3339Nano)
+			stoppedSeconds = view.StoppedSeconds
+			stoppedStage = view.Stage
+		}
 	}
 
-	m.checkStoppedVehicle(client.ID, rideID, vType, update.Lat, update.Lng, time.Now())
+	if m.EventBus != nil && m.allowLocPublish(client.ID) {
+		driver, _ := m.LocStore.FleetDriver(client.ID)
+		m.EventBus.PublishEvent(eventbus.ChannelDriverLocationUpdate, eventbus.DriverLocationUpdatePayload{
+			DriverID:       client.ID,
+			DriverName:     driver.DriverName,
+			Lat:            update.Lat,
+			Lng:            update.Lng,
+			RideID:         rideID,
+			Status:         string(driver.Status),
+			VehicleType:    driver.VehicleType,
+			UpdatedAt:      driver.LastUpdated.UTC().Format(time.RFC3339Nano),
+			StoppedSince:   stoppedSince,
+			StoppedSeconds: stoppedSeconds,
+			StoppedStage:   stoppedStage,
+			RequestID:      client.SessionID,
+		})
+	}
 }
 
 // checkStoppedVehicle implements the two-stage stopped-vehicle trigger for
@@ -88,17 +104,26 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 // but driver nudge and admin alarm still fire).
 // 3 min stopped -> warn driver, 5 min total -> escalate (flag + admin push).
 // It reuses Book-Any type resolution and is a no-op when deps are unset (tests).
-func (m *Manager) checkStoppedVehicle(driverID, rideID, vehicleTypeID string, lat, lng float64, now time.Time) {
-	if m.Safety == nil || m.RideStore == nil || m.EventBus == nil {
-		return
+func (m *Manager) checkStoppedVehicle(driverID, rideID, vehicleTypeID string, lat, lng float64, now time.Time, sessionID string) *safety.VehicleState {
+	if m.Safety == nil || m.RideStore == nil || m.EventBus == nil || rideID == "" {
+		return nil
 	}
-	if rideID == "" {
-		m.Safety.Reset(driverID)
-		return
+	m.mu.RLock()
+	cachedAmbName := m.AmbTypeNames[vehicleTypeID]
+	m.mu.RUnlock()
+	if safety.IsExcludedVehicleType(cachedAmbName) {
+		if m.Safety.ResetState(driverID) {
+			m.deleteSafetyState(driverID)
+		}
+		return nil
 	}
-	action, elapsed := m.Safety.Check(driverID, rideID, lat, lng, now)
+
+	action, elapsed, state, changed := m.Safety.CheckState(driverID, rideID, lat, lng, now)
+	if changed {
+		m.persistSafetyState(state)
+	}
 	if action == safety.ActionNone {
-		return
+		return &state
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -109,28 +134,21 @@ func (m *Manager) checkStoppedVehicle(driverID, rideID, vehicleTypeID string, la
 		if err != nil {
 			logger.Log.Error().Err(err).Str("ride_id", rideID).Msg("Stopped-vehicle: GetRideByID failed")
 		}
-		return
+		return &state
 	}
-	// Only IN_PROGRESS rides owned by this driver qualify (SOS included).
-	if r.Status != ride.StatusInProgress {
-		m.Safety.Reset(driverID)
-		return
-	}
-	if r.DriverID == nil || *r.DriverID != driverID {
-		m.Safety.Reset(driverID)
-		return
+	if r.Status != ride.StatusInProgress || r.DriverID == nil || *r.DriverID != driverID {
+		m.resetSafetyState(driverID)
+		return nil
 	}
 	ambName := m.ambulanceTypeName(ctx, vehicleTypeID, r)
 	if safety.IsExcludedVehicleType(ambName) {
-		m.Safety.Reset(driverID)
-		return
+		m.resetSafetyState(driverID)
+		return nil
 	}
 
-	// Contact details so every consumer (banner, push, dashboard) can act
-	// without another lookup: who, in what, which trip.
 	var driverName, driverMobile string
 	if ids.IsValid(driverID) {
-		if drv, lerr := m.AuthStore.FindDriverByID(ctx, driverID); lerr == nil && drv != nil {
+		if drv, lookupErr := m.AuthStore.FindDriverByID(ctx, driverID); lookupErr == nil && drv != nil {
 			driverName, driverMobile = drv.Name, drv.Mobile
 		}
 	}
@@ -151,27 +169,27 @@ func (m *Manager) checkStoppedVehicle(driverID, rideID, vehicleTypeID string, la
 			RideID: rideID, DriverID: driverID, UserID: r.UserID,
 			Lat: lat, Lng: lng, StoppedMinutes: stoppedMin, AmbType: ambType,
 			AmbTypeName: ambName, DriverName: driverName, DriverMobile: driverMobile, RideRef: rideRef,
+			RequestID: sessionID,
 		})
 	case safety.ActionEscalate:
 		if r.EmergencyPriority == 0 {
-			escalated, err := m.RideStore.EscalateEmergencyForStoppedVehicle(ctx, rideID)
-			if err != nil {
-				logger.Log.Error().Err(err).Str("ride_id", rideID).Msg("Stopped-vehicle: escalation update failed")
-				return
+			escalated, updateErr := m.RideStore.EscalateEmergencyForStoppedVehicle(ctx, rideID)
+			if updateErr != nil {
+				logger.Log.Error().Err(updateErr).Str("ride_id", rideID).Msg("Stopped-vehicle: escalation update failed")
+				return &state
 			}
 			if !escalated {
-				// Ride finished concurrently; nothing more to do.
-				return
+				return &state
 			}
 		}
-		// Already-SOS rides skip the flag write above but still raise the
-		// alarm: the notification is the point, not the flag.
 		m.EventBus.PublishEvent(eventbus.ChannelSafetyStoppedAlarm, eventbus.SafetyStoppedEmergencyPayload{
 			RideID: rideID, DriverID: driverID, UserID: r.UserID,
 			Lat: lat, Lng: lng, StoppedMinutes: stoppedMin, AmbType: ambType,
 			AmbTypeName: ambName, DriverName: driverName, DriverMobile: driverMobile, RideRef: rideRef,
+			RequestID: sessionID,
 		})
 	}
+	return &state
 }
 
 // ambulanceTypeName resolves the display name using the cached Book-Any map,

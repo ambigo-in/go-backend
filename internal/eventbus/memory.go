@@ -3,6 +3,7 @@ package eventbus
 import (
 	"encoding/json"
 	"sync"
+	"time"
 
 	"ambigo-backend/interfaces"
 	"ambigo-backend/internal/logger"
@@ -33,7 +34,17 @@ func (b *InMemoryBus) Publish(channel string, payload []byte) error {
 		case ch <- payloadCopy:
 		default:
 			metrics.EventBusMessagesDropped.WithLabelValues(channel).Inc()
-			logger.Log.Warn().Str("channel", channel).Msg("Dropping message: subscriber too slow")
+			logEvent := logger.Log.Warn().Str("channel", channel)
+			var obj map[string]interface{}
+			if json.Unmarshal(payloadCopy, &obj) == nil {
+				if ev, ok := obj["_event"].(string); ok && ev != "" {
+					logEvent = logEvent.Str("event", ev)
+				}
+				if rid, ok := obj["ride_id"].(string); ok && rid != "" {
+					logEvent = logEvent.Str("ride_id", rid)
+				}
+			}
+			logEvent.Msg("Dropping message: subscriber too slow")
 		}
 	}
 	return nil
@@ -45,14 +56,22 @@ func (b *InMemoryBus) PublishEvent(channel string, v interface{}) error {
 	if err != nil {
 		return err
 	}
-	// Inject the channel name into the payload so subscribers (e.g. AuditLogger)
-	// can record which channel an event came from.
 	var obj map[string]interface{}
-	if err := json.Unmarshal(data, &obj); err == nil && obj != nil {
-		obj["_channel"] = channel
-		if data, err = json.Marshal(obj); err != nil {
-			return err
-		}
+	if err := json.Unmarshal(data, &obj); err != nil || obj == nil {
+		return b.Publish(channel, data)
+	}
+	// Envelope fields every consumer can rely on, whatever the payload shape:
+	// _channel (bus channel), _event (canonical underscore name),
+	// _ts (event time), _request_id (correlation id, empty if none).
+	// Typed-payload consumers ignore unknown keys, so this is non-breaking.
+	obj["_channel"] = channel
+	obj["_event"] = CanonicalEventName(channel)
+	obj["_ts"] = time.Now().UTC().Format(time.RFC3339Nano)
+	if rid, ok := obj["request_id"].(string); ok && rid != "" {
+		obj["_request_id"] = rid
+	}
+	if data, err = json.Marshal(obj); err != nil {
+		return err
 	}
 	return b.Publish(channel, data)
 }

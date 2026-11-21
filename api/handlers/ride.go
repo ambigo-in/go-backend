@@ -196,7 +196,11 @@ func (h *RideHandler) HandleRequestRide(w http.ResponseWriter, r *http.Request) 
 
 	// Book Any: resolve to a type with nearby available drivers
 	if req.AmbTypeID == "" {
-		candidates, err := h.Dispatcher.Matcher.FindBestDrivers(r.Context(), req.PickupLat, req.PickupLng, 5, "")
+		maxCand := 10
+		if h.Dispatcher != nil && h.Dispatcher.MaxCandidates > 0 {
+			maxCand = h.Dispatcher.MaxCandidates
+		}
+		candidates, err := h.Dispatcher.Matcher.FindBestDrivers(r.Context(), req.PickupLat, req.PickupLng, maxCand, "")
 		if err != nil || len(candidates) == 0 {
 			availableTypes := h.Dispatcher.Matcher.FindAvailableOtherTypes(req.PickupLat, req.PickupLng, "")
 			w.Header().Set("Content-Type", "application/json")
@@ -407,7 +411,7 @@ func (h *RideHandler) HandleArrive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.EventBus.PublishEvent(eventbus.ChannelRideArrived, eventbus.RideStatusChangedPayload{
-		RideID: rideID, UserID: rideData.UserID, Status: string(ride.StatusArrived), RequestID: reqID,
+		RideID: rideID, UserID: rideData.UserID, DriverID: callerID, Status: string(ride.StatusArrived), RequestID: reqID,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Driver Arrived"})
@@ -493,7 +497,7 @@ func (h *RideHandler) HandleStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.EventBus.PublishEvent(eventbus.ChannelRideStarted, eventbus.RideStatusChangedPayload{
-		RideID: rideID, UserID: rideData.UserID, Status: string(ride.StatusInProgress), RequestID: reqID,
+		RideID: rideID, UserID: rideData.UserID, DriverID: callerID, Status: string(ride.StatusInProgress), RequestID: reqID,
 	})
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"detail": "Ride Started"})

@@ -344,3 +344,53 @@ func TestWithdrawOthersSkipsWinner(t *testing.T) {
 		t.Fatalf("expected d1+d3 withdrawn, got %v", got)
 	}
 }
+
+func TestBroadcastMultiRing10KmRadius(t *testing.T) {
+	bus := eventbus.NewInMemoryBus()
+	ls := location.NewMemoryStore()
+
+	// Drivers at ~1km, ~3km, ~5km, ~7km, and ~15km
+	drivers := map[string][2]float64{
+		"d-1km":  {17.3850 + 0.009*1.0, 78.4867},
+		"d-3km":  {17.3850 + 0.009*3.0, 78.4867},
+		"d-5km":  {17.3850 + 0.009*5.0, 78.4867},
+		"d-7km":  {17.3850 + 0.009*7.0, 78.4867},
+		"d-15km": {17.3850 + 0.009*15.0, 78.4867},
+	}
+	for id, ll := range drivers {
+		if err := ls.UpdateLocation(id, ll[0], ll[1]); err != nil {
+			t.Fatal(err)
+		}
+		if err := ls.SetDriverVehicleType(id, "type-a"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	m := NewMatcher(ls, NewRouteClient("", ""), map[string]string{"type-a": "Test Ambulance"})
+	m.RadiusKm = 10.0
+	store := newFakeRideStore()
+	d := NewDispatcher(m, store, bus, &websocket.Manager{})
+	d.MaxCandidates = 10
+	d.RadiusKm = 10.0
+
+	offeredCh := bus.SubscribeWithChan(eventbus.ChannelRideDriverOffered)
+
+	r := newBroadcastTestRide()
+	if err := d.RequestRide(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+
+	// Expect exactly 4 offers (1km, 3km, 5km, 7km), d-15km should be excluded
+	offers := collectOffered(t, offeredCh, 4)
+	got := offeredDriverSet(offers)
+
+	expected := []string{"d-1km", "d-3km", "d-5km", "d-7km"}
+	for _, id := range expected {
+		if !got[id] {
+			t.Fatalf("expected driver %s to receive offer; got %v", id, got)
+		}
+	}
+	if got["d-15km"] {
+		t.Fatal("driver d-15km outside 10km radius should NOT receive offer")
+	}
+}

@@ -865,6 +865,31 @@ func (s *Store) GetRideByID(ctx context.Context, rideID string) (*Ride, error) {
 	return ride, nil
 }
 
+type ActiveDriverRide struct {
+	RideID   string
+	DriverID string
+	Status   RideStatus
+}
+
+func (s *Store) ListActiveDriverRides(ctx context.Context) ([]ActiveDriverRide, error) {
+	rows, err := s.db.Query(ctx, `SELECT id::text, driver_id::text, status
+		FROM rides
+		WHERE driver_id IS NOT NULL AND status IN ('ASSIGNED','ARRIVED','IN_PROGRESS')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	active := make([]ActiveDriverRide, 0)
+	for rows.Next() {
+		var item ActiveDriverRide
+		if err := rows.Scan(&item.RideID, &item.DriverID, &item.Status); err != nil {
+			return nil, err
+		}
+		active = append(active, item)
+	}
+	return active, rows.Err()
+}
+
 // GetRideHistory returns a paginated list of rides for a specific user or driver.
 func (s *Store) GetRideHistory(ctx context.Context, entityID string, role string, limit, skip int64) ([]*Ride, error) {
 	if role != "user" && role != "driver" {

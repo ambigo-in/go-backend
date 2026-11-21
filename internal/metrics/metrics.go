@@ -84,6 +84,21 @@ var (
 		Name: "circuit_breaker_transitions_total",
 		Help: "Total circuit breaker state transitions",
 	}, []string{"client", "from_state", "to_state"})
+
+	AnalyticsBufferDroppedTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ambigo_analytics_buffer_dropped_total",
+		Help: "Analytics events dropped because the shipper buffer was full",
+	})
+
+	AnalyticsShippedTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ambigo_analytics_shipped_total",
+		Help: "Analytics events delivered to a sink",
+	}, []string{"sink"})
+
+	AnalyticsShipErrorsTotal = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "ambigo_analytics_ship_errors_total",
+		Help: "Analytics events dropped after retries, per sink",
+	}, []string{"sink"})
 )
 
 // Compatibility aliases for checkers expecting alternative variable names

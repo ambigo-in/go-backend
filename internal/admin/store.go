@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"ambigo-backend/internal/ids"
 
@@ -145,7 +146,13 @@ func scanAdmin(row pgx.Row) (*Admin, error) {
 }
 
 func (s *Store) FindAdminByUsername(ctx context.Context, username string) (*Admin, error) {
-	const q = `SELECT id, username, hashed_password, name, role, active, mobile FROM admins WHERE username=$1`
+	username = strings.TrimSpace(username)
+	const q = `SELECT id, username, hashed_password, name, role, active, mobile FROM admins 
+		WHERE LOWER(TRIM(username)) = LOWER($1) 
+		   OR (mobile IS NOT NULL AND mobile <> '' AND TRIM(mobile) = $1)
+		   OR LOWER(TRIM(name)) = LOWER($1)
+		ORDER BY CASE WHEN LOWER(TRIM(username)) = LOWER($1) THEN 1 ELSE 2 END
+		LIMIT 1`
 	row := s.pool.QueryRow(ctx, q, username)
 	a, err := scanAdmin(row)
 	if err != nil {
@@ -248,4 +255,134 @@ func (s *Store) UpdateAdminPassword(ctx context.Context, id string, hashedPasswo
 	const q = `UPDATE admins SET hashed_password=$1, updated_at=now() WHERE id=$2::uuid`
 	_, err := s.pool.Exec(ctx, q, hashedPassword, id)
 	return err
+}
+
+func (s *Store) ListStaff(ctx context.Context) ([]*AdminStaff, error) {
+	const q = `SELECT id::text, COALESCE(username, ''), name, role, active, COALESCE(mobile, ''), created_at, updated_at
+		FROM admins ORDER BY created_at ASC`
+	rows, err := s.pool.Query(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*AdminStaff
+	for rows.Next() {
+		var a AdminStaff
+		if err := rows.Scan(&a.ID, &a.Username, &a.Name, &a.Role, &a.Active, &a.Mobile, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		a.IDAlias = a.ID
+		a.Email = a.Username
+		if a.Active {
+			a.Status = "active"
+		} else {
+			a.Status = "suspended"
+		}
+		list = append(list, &a)
+	}
+	if list == nil {
+		list = []*AdminStaff{}
+	}
+	return list, rows.Err()
+}
+
+func (s *Store) CreateStaff(ctx context.Context, id, username, hashedPassword, name, role, mobile string) (*AdminStaff, error) {
+	if ids.IsZero(id) {
+		id = ids.New()
+	}
+	if role == "" {
+		role = "admin"
+	}
+	const q = `INSERT INTO admins (id, username, hashed_password, name, role, active, mobile, created_at, updated_at)
+		VALUES ($1::uuid, $2, $3, $4, $5, true, NULLIF($6, ''), now(), now())
+		RETURNING id::text, COALESCE(username, ''), name, role, active, COALESCE(mobile, ''), created_at, updated_at`
+	var a AdminStaff
+	err := s.pool.QueryRow(ctx, q, id, username, hashedPassword, name, role, mobile).
+		Scan(&a.ID, &a.Username, &a.Name, &a.Role, &a.Active, &a.Mobile, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	a.IDAlias = a.ID
+	a.Email = a.Username
+	a.Status = "active"
+	return &a, nil
+}
+
+func (s *Store) UpdateStaff(ctx context.Context, id, name, mobile, role string) (*AdminStaff, error) {
+	if !ids.IsValid(id) {
+		return nil, fmt.Errorf("invalid admin id: %s", id)
+	}
+	const q = `UPDATE admins
+		SET name=$1, mobile=NULLIF($2, ''), role=$3, updated_at=now()
+		WHERE id=$4::uuid
+		RETURNING id::text, COALESCE(username, ''), name, role, active, COALESCE(mobile, ''), created_at, updated_at`
+	var a AdminStaff
+	err := s.pool.QueryRow(ctx, q, name, mobile, role, id).
+		Scan(&a.ID, &a.Username, &a.Name, &a.Role, &a.Active, &a.Mobile, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	a.IDAlias = a.ID
+	a.Email = a.Username
+	if a.Active {
+		a.Status = "active"
+	} else {
+		a.Status = "suspended"
+	}
+	return &a, nil
+}
+
+func (s *Store) SetStaffActive(ctx context.Context, id string, active bool) (*AdminStaff, error) {
+	if !ids.IsValid(id) {
+		return nil, fmt.Errorf("invalid admin id: %s", id)
+	}
+	const q = `UPDATE admins
+		SET active=$1, updated_at=now()
+		WHERE id=$2::uuid
+		RETURNING id::text, COALESCE(username, ''), name, role, active, COALESCE(mobile, ''), created_at, updated_at`
+	var a AdminStaff
+	err := s.pool.QueryRow(ctx, q, active, id).
+		Scan(&a.ID, &a.Username, &a.Name, &a.Role, &a.Active, &a.Mobile, &a.CreatedAt, &a.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	a.IDAlias = a.ID
+	a.Email = a.Username
+	if a.Active {
+		a.Status = "active"
+	} else {
+		a.Status = "suspended"
+	}
+	return &a, nil
+}
+
+func (s *Store) DeleteStaff(ctx context.Context, id string) error {
+	if !ids.IsValid(id) {
+		return fmt.Errorf("invalid admin id: %s", id)
+	}
+	const q = `DELETE FROM admins WHERE id=$1::uuid`
+	_, err := s.pool.Exec(ctx, q, id)
+	return err
+}
+
+func (s *Store) CountActiveSuperAdmins(ctx context.Context) (int, error) {
+	const q = `SELECT COUNT(*) FROM admins WHERE role='super_admin' AND active=true`
+	var count int
+	err := s.pool.QueryRow(ctx, q).Scan(&count)
+	return count, err
+}
+
+func (s *Store) CheckAdminUsernameExists(ctx context.Context, username, excludeID string) (bool, error) {
+	var q string
+	var err error
+	var exists bool
+	if excludeID != "" && ids.IsValid(excludeID) {
+		q = `SELECT EXISTS(SELECT 1 FROM admins WHERE LOWER(username)=LOWER($1) AND id<>$2::uuid)`
+		err = s.pool.QueryRow(ctx, q, username, excludeID).Scan(&exists)
+	} else {
+		q = `SELECT EXISTS(SELECT 1 FROM admins WHERE LOWER(username)=LOWER($1))`
+		err = s.pool.QueryRow(ctx, q, username).Scan(&exists)
+	}
+	return exists, err
 }

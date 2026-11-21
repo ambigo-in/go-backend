@@ -2,13 +2,13 @@
 
 ## Overview
 
-Ambigo is a Go-based ambulance booking backend. It exposes **63 REST API endpoints** and **1 WebSocket endpoint** across 14 functional modules.
+Ambigo is a Go-based ambulance booking backend. It exposes **70 REST API endpoints** and **1 WebSocket endpoint** across 15 functional modules.
 
 | Metric | Count |
 |--------|-------|
-| Total REST Endpoints | 63 |
+| Total REST Endpoints | 70 |
 | Total WebSocket Endpoints | 1 |
-| Modules | 14 |
+| Modules | 15 |
 | Databases | 4 (Users, Rides, Records, Data) |
 
 ---
@@ -227,11 +227,14 @@ All errors use a consistent JSON format:
 
 ---
 
-### 12. Admin (20 endpoints)
+### 12. Admin Auth & Drivers (22 endpoints)
 
 | Method | Endpoint | Auth | Description |
 |--------|----------|------|-------------|
 | POST | `/api/v2/admin/login` | API Key | Admin username/password login |
+| POST | `/api/v2/admin/register` | API Key | Register admin (auto-super_admin bootstrap) |
+| POST | `/api/v2/admin/signup` | API Key | Alias for admin registration |
+| GET / POST | `/api/v2/admin/me` | JWT (admin) | Get authenticated admin profile & role |
 | POST | `/api/v2/admin/login/mobile` | API Key | Admin OTP request |
 | POST | `/api/v2/admin/login/mobile/verify` | API Key | Admin OTP verify |
 | POST | `/api/v2/admin/password` | JWT (admin) | Change admin password |
@@ -277,6 +280,18 @@ All errors use a consistent JSON format:
 | DELETE | `/api/v2/admin/offers/{id}` | JWT (admin) | Delete offer |
 | GET | `/api/v2/admin/referral/config` | JWT (admin) | Get referral config |
 | POST | `/api/v2/admin/referral/config` | JWT (admin) | Save referral config |
+
+---
+
+### 15. Admin — Staff & Roles / Co-Admin Management (5 endpoints)
+
+| Method | Endpoint | Auth | Description |
+|--------|----------|------|-------------|
+| POST | `/api/v2/admin/staff/list` | JWT (admin) | List all staff members (active & suspended) |
+| POST | `/api/v2/admin/staff/create` | JWT (admin) | Create staff account with role assignment |
+| POST | `/api/v2/admin/staff/update` | JWT (admin) | Update staff name, mobile, role, reset password |
+| POST | `/api/v2/admin/staff/toggle` | JWT (admin) | Suspend or reactivate staff account |
+| POST | `/api/v2/admin/staff/delete` | JWT (admin) | Remove staff account (with last super_admin guard) |
 
 ---
 

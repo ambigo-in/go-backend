@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -86,21 +87,27 @@ func (h *AdminHandler) HandleAdminLogin(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	req.Username = strings.TrimSpace(req.Username)
+
 	adminUser, err := h.Store.FindAdminByUsername(r.Context(), req.Username)
 	if err != nil {
+		logger.Log.Error().Err(err).Str("username", req.Username).Msg("Admin login error during lookup")
 		response.Error(w, "Internal error", http.StatusInternalServerError)
 		return
 	}
 	if adminUser == nil {
+		logger.Log.Warn().Str("username", req.Username).Msg("Admin login failed: admin not found")
 		response.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
 	if !adminUser.Active {
+		logger.Log.Warn().Str("username", req.Username).Msg("Admin login failed: account suspended")
 		response.Error(w, "Account deactivated", http.StatusForbidden)
 		return
 	}
 
 	if err := bcrypt.CompareHashAndPassword([]byte(adminUser.HashedPassword), []byte(req.Password)); err != nil {
+		logger.Log.Warn().Str("username", req.Username).Msg("Admin login failed: password mismatch")
 		response.Error(w, "Invalid credentials", http.StatusUnauthorized)
 		return
 	}
@@ -112,9 +119,143 @@ func (h *AdminHandler) HandleAdminLogin(w http.ResponseWriter, r *http.Request) 
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{
+	json.NewEncoder(w).Encode(map[string]interface{}{
 		"detail": "Admin Login Successful",
 		"token":  token,
+		"user": map[string]interface{}{
+			"id":       adminUser.ID,
+			"_id":      adminUser.ID,
+			"username": adminUser.Username,
+			"name":     adminUser.Name,
+			"role":     adminUser.Role,
+			"mobile":   adminUser.Mobile,
+		},
+	})
+}
+
+// HandleAdminRegister allows registering a new admin account.
+func (h *AdminHandler) HandleAdminRegister(w http.ResponseWriter, r *http.Request) {
+	reqID := requestid.FromContext(r.Context())
+
+	var req struct {
+		Username string `json:"username" validate:"required"`
+		Password string `json:"password" validate:"required"`
+		Name     string `json:"name" validate:"required"`
+		Mobile   string `json:"mobile"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !response.Validate(w, &req) {
+		return
+	}
+
+	req.Username = strings.TrimSpace(req.Username)
+	req.Name = strings.TrimSpace(req.Name)
+	req.Mobile = strings.TrimSpace(req.Mobile)
+	req.Role = strings.TrimSpace(req.Role)
+
+	if len(req.Username) < 3 {
+		response.Error(w, "Username must be at least 3 characters", http.StatusBadRequest)
+		return
+	}
+	if len(req.Password) < 6 {
+		response.Error(w, "Password must be at least 6 characters", http.StatusBadRequest)
+		return
+	}
+
+	// If no super_admin exists in the system, first registered admin becomes super_admin
+	count, _ := h.Store.CountActiveSuperAdmins(r.Context())
+	if count == 0 {
+		req.Role = "super_admin"
+	} else if req.Role == "" || (req.Role != "admin" && req.Role != "super_admin") {
+		req.Role = "admin"
+	}
+
+	exists, err := h.Store.CheckAdminUsernameExists(r.Context(), req.Username, "")
+	if err != nil {
+		logger.Log.Error().Err(err).Str("username", req.Username).Msg("Username check failed")
+		response.Error(w, "Internal error checking username", http.StatusInternalServerError)
+		return
+	}
+	if exists {
+		response.Error(w, "Admin with this username already exists", http.StatusConflict)
+		return
+	}
+
+	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	if err != nil {
+		logger.Log.Error().Err(err).Msg("Password hash failed")
+		response.Error(w, "Failed to hash password", http.StatusInternalServerError)
+		return
+	}
+
+	newID := ids.New()
+	staff, err := h.Store.CreateStaff(r.Context(), newID, req.Username, string(hashed), req.Name, req.Role, req.Mobile)
+	if err != nil {
+		logger.Log.Error().Err(err).Str("username", req.Username).Msg("Failed to register admin")
+		response.Error(w, "Failed to register admin account", http.StatusInternalServerError)
+		return
+	}
+
+	token, err := auth.GenerateJWT(staff.ID, "admin", staff.Role, h.JWTSecret)
+	if err != nil {
+		logger.Log.Error().Err(err).Msg("Failed to generate token on register")
+		response.Error(w, "Account created, but failed to generate token. Please sign in.", http.StatusInternalServerError)
+		return
+	}
+
+	h.EventBus.PublishEvent(eventbus.ChannelAdminStaffCreated, eventbus.AdminStaffPayload{
+		AdminID:   staff.ID,
+		Username:  staff.Username,
+		Name:      staff.Name,
+		Role:      staff.Role,
+		Action:    "registered",
+		ActorID:   staff.ID,
+		RequestID: reqID,
+	})
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"detail": "Admin registered successfully",
+		"token":  token,
+		"user": map[string]interface{}{
+			"id":       staff.ID,
+			"_id":      staff.ID,
+			"username": staff.Username,
+			"name":     staff.Name,
+			"role":     staff.Role,
+			"mobile":   staff.Mobile,
+		},
+	})
+}
+
+// HandleAdminMe returns the currently authenticated admin's details.
+func (h *AdminHandler) HandleAdminMe(w http.ResponseWriter, r *http.Request) {
+	adminID, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok || adminID == "" {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	adminUser, err := h.Store.FindAdminByID(r.Context(), adminID)
+	if err != nil || adminUser == nil {
+		response.Error(w, "Admin not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{
+		"id":       adminUser.ID,
+		"_id":      adminUser.ID,
+		"username": adminUser.Username,
+		"name":     adminUser.Name,
+		"role":     adminUser.Role,
+		"active":   adminUser.Active,
+		"mobile":   adminUser.Mobile,
 	})
 }
 
@@ -829,7 +970,8 @@ func (h *AdminHandler) HandleDriverRideList(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	json.NewEncoder(w).Encode(rides)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.enrichAdminRides(r.Context(), rides))
 }
 
 // ---------------------------------------------------------------
@@ -989,15 +1131,109 @@ func (h *AdminHandler) HandleUserRideList(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	json.NewEncoder(w).Encode(rides)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.enrichAdminRides(r.Context(), rides))
 }
 
 // ---------------------------------------------------------------
-// RIDE LISTING (completed / ongoing)
+// RIDE LISTING (completed / ongoing / filtered)
 // ---------------------------------------------------------------
+
+// adminRide is a ride plus display names resolved server-side so the console
+// never shows raw user/driver/hospital/ambulance-type IDs.
+type adminRide struct {
+	*ride.Ride
+	UserName     string `json:"user_name,omitempty"`
+	UserMobile   string `json:"user_mobile,omitempty"`
+	DriverName   string `json:"driver_name,omitempty"`
+	DriverMobile string `json:"driver_mobile,omitempty"`
+	HospitalName string `json:"hospital_name,omitempty"`
+	AmbTypeName  string `json:"amb_type_name,omitempty"`
+}
+
+// enrichAdminRides resolves names onto console ride lists. Every lookup is
+// non-fatal: a failure leaves the field empty instead of failing the list.
+func (h *AdminHandler) enrichAdminRides(ctx context.Context, rides []*ride.Ride) []adminRide {
+	nameByAmbID := map[string]string{}
+	if ambTypes, err := h.Store.ListAmbulanceTypes(ctx); err == nil {
+		for _, t := range ambTypes {
+			nameByAmbID[t.ID] = t.Name
+		}
+	}
+	out := make([]adminRide, 0, len(rides))
+	for _, rd := range rides {
+		er := adminRide{Ride: rd}
+		if rd.UserID != "" {
+			if u, err := h.AuthStore.FindUserByID(ctx, rd.UserID); err == nil && u != nil {
+				er.UserName = u.Name
+				er.UserMobile = u.Mobile
+			}
+		}
+		if rd.DriverID != nil && *rd.DriverID != "" {
+			if drv, err := h.AuthStore.FindDriverByID(ctx, *rd.DriverID); err == nil && drv != nil {
+				er.DriverName = drv.Name
+				er.DriverMobile = drv.Mobile
+			}
+		}
+		if rd.HospitalID != nil && *rd.HospitalID != "" {
+			if hosp, err := h.HospitalStore.FindByID(ctx, *rd.HospitalID); err == nil && hosp != nil {
+				er.HospitalName = hosp.Name["en_US"]
+			}
+		}
+		if rd.AmbTypeID != nil {
+			er.AmbTypeName = nameByAmbID[*rd.AmbTypeID]
+		}
+		out = append(out, er)
+	}
+	return out
+}
+
+// allRideStatuses is the full ordered set of ride statuses.
+var allRideStatuses = []ride.RideStatus{
+	ride.StatusSearching, ride.StatusAssigned, ride.StatusArrived,
+	ride.StatusInProgress, ride.StatusCompleted, ride.StatusCancelled,
+}
 
 type rideStatusFilter struct {
 	Status ride.RideStatus `json:"status"`
+	Limit  int64           `json:"limit"`
+	Skip   int64           `json:"skip"`
+}
+
+// HandleListRides returns the most recent rides, optionally filtered to a
+// single status (e.g. "CANCELLED"). Empty status returns all rides.
+func (h *AdminHandler) HandleListRides(w http.ResponseWriter, r *http.Request) {
+	var req rideStatusFilter
+	_ = json.NewDecoder(r.Body).Decode(&req)
+	if req.Limit <= 0 || req.Limit > 100 {
+		req.Limit = 100
+	}
+	if req.Skip < 0 {
+		req.Skip = 0
+	}
+	statuses := allRideStatuses
+	if req.Status != "" {
+		valid := false
+		for _, st := range allRideStatuses {
+			if st == req.Status {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			response.Error(w, "Invalid status", http.StatusBadRequest)
+			return
+		}
+		statuses = []ride.RideStatus{req.Status}
+	}
+	rides, err := h.RideStore.ListRidesByStatus(r.Context(), statuses, req.Limit, req.Skip)
+	if err != nil {
+		response.Error(w, "Internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.enrichAdminRides(r.Context(), rides))
 }
 
 // HandleListCompletedRides returns all completed rides
@@ -1008,7 +1244,8 @@ func (h *AdminHandler) HandleListCompletedRides(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	json.NewEncoder(w).Encode(rides)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.enrichAdminRides(r.Context(), rides))
 }
 
 // HandleListOngoingRides returns all currently active rides (ASSIGNED, ARRIVED, IN_PROGRESS)
@@ -1019,7 +1256,8 @@ func (h *AdminHandler) HandleListOngoingRides(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	json.NewEncoder(w).Encode(rides)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(h.enrichAdminRides(r.Context(), rides))
 }
 
 // ---------------------------------------------------------------

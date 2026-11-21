@@ -18,10 +18,12 @@ import (
 )
 
 type Dispatcher struct {
-	Matcher   *Matcher
-	RideStore RideStoreAPI
-	EventBus  *eventbus.InMemoryBus
-	WSManager *websocket.Manager
+	Matcher        *Matcher
+	RideStore      RideStoreAPI
+	EventBus       *eventbus.InMemoryBus
+	WSManager      *websocket.Manager
+	MaxCandidates  int
+	RadiusKm       float64
 
 	acceptChannels  map[string]chan string
 	declineChannels map[string]chan string
@@ -53,6 +55,8 @@ func NewDispatcher(matcher *Matcher, rideStore RideStoreAPI, eventBus *eventbus.
 		RideStore:       rideStore,
 		EventBus:        eventBus,
 		WSManager:       wsManager,
+		MaxCandidates:   10,
+		RadiusKm:        10.0,
 		acceptChannels:  make(map[string]chan string),
 		declineChannels: make(map[string]chan string),
 	}
@@ -88,11 +92,14 @@ func (d *Dispatcher) RequestRide(ctx context.Context, r *ride.Ride) error {
 
 	rideID := r.ID
 
+	chanBuf := d.MaxCandidates * 2
+	if chanBuf < 16 {
+		chanBuf = 16
+	}
+
 	d.mu.Lock()
-	// Buffered for broadcast: up to 5 concurrent accepts/declines plus the
-	// hospital-first offer must never block their HTTP handlers.
-	d.acceptChannels[rideID] = make(chan string, 8)
-	d.declineChannels[rideID] = make(chan string, 8)
+	d.acceptChannels[rideID] = make(chan string, chanBuf)
+	d.declineChannels[rideID] = make(chan string, chanBuf)
 	d.mu.Unlock()
 
 	pickupLng, pickupLat := r.Pickup.Coordinates[0], r.Pickup.Coordinates[1]
@@ -450,7 +457,11 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 
 	// Phase 1 — normal flow: nearest drivers, excluding the hospital-first
 	// driver if already offered (never offer the same driver twice).
-	candidates, err := d.Matcher.FindBestDrivers(context.Background(), pickupLat, pickupLng, 5, ambTypeID)
+	maxCand := d.MaxCandidates
+	if maxCand <= 0 {
+		maxCand = 10
+	}
+	candidates, err := d.Matcher.FindBestDrivers(context.Background(), pickupLat, pickupLng, maxCand, ambTypeID)
 	if err == nil && len(candidates) > 0 && len(offered) > 0 {
 		kept := candidates[:0]
 		for _, c := range candidates {

@@ -12,6 +12,7 @@ import (
 	"ambigo-backend/internal/admin"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/eventbus"
+	"ambigo-backend/internal/requestid"
 	"ambigo-backend/internal/ride"
 	"ambigo-backend/internal/websocket"
 
@@ -454,6 +455,27 @@ func (h *HospitalDashboardHandler) HandleUpdateRideCondition(w http.ResponseWrit
 		response.Error(w, "Failed to update", http.StatusInternalServerError)
 		return
 	}
+	// Publish on the bus so the update reaches audit + analytics (the SOS
+	// queue in the ops console reads this stream). WS pushes below stay the
+	// live-update path for connected screens.
+	if h.EventBus != nil {
+		evt := eventbus.RideConditionUpdatedPayload{
+			RideID:    rideID,
+			UserID:    rideDoc.UserID,
+			Level:     level,
+			Severity:  upd.Severity,
+			Note:      req.Note,
+			Source:    source,
+			RequestID: requestid.FromContext(r.Context()),
+		}
+		if rideDoc.DriverID != nil {
+			evt.DriverID = *rideDoc.DriverID
+		}
+		if rideDoc.HospitalID != nil {
+			evt.HospitalID = *rideDoc.HospitalID
+		}
+		_ = h.EventBus.PublishEvent(eventbus.ChannelRideConditionUpdated, evt)
+	}
 	// Push to driver via WS
 	if rideDoc.DriverID != nil {
 		h.WSManager.SendToClient("driver", *rideDoc.DriverID, "CONDITION_UPDATE", map[string]interface{}{
@@ -794,6 +816,7 @@ func (h *HospitalDashboardHandler) HandleDeclineRide(w http.ResponseWriter, r *h
 			DropAddress:  newDropAddr,
 			FromHospital: hid,
 			Status:       string(rideDoc.Status),
+			RequestID:    requestid.FromContext(r.Context()),
 		})
 	}
 

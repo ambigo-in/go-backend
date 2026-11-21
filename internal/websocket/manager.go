@@ -48,7 +48,8 @@ type Manager struct {
 	rideWatchers map[string]map[*Client]bool
 
 	// Active ride lookup lets driver location updates reach the watching user.
-	activeDriverRide map[string]string
+	activeDriverRide   map[string]string
+	activeDriverStatus map[string]ride.RideStatus
 
 	// Inbound messages from the clients.
 	broadcast chan []byte
@@ -93,7 +94,8 @@ type Manager struct {
 	AmbTypeNames map[string]string
 
 	// Safety tracks per-driver stopped state for the 3/5-minute stages.
-	Safety *safety.Tracker
+	Safety      *safety.Tracker
+	SafetyStore *safety.StateStore
 
 	// locThrottle caps location fan-out: max 1 bus event per driver per
 	// interval (giants: ~1 per 3s). Extra pings still update the store.
@@ -153,31 +155,48 @@ func (m *Manager) removeClientLocked(client *Client) {
 
 func NewManager(locStore *location.MemoryStore, authStore *auth.Store, eventBus *eventbus.InMemoryBus) *Manager {
 	return &Manager{
-		broadcast:        make(chan []byte),
-		register:         make(chan *Client),
-		unregister:       make(chan *Client),
-		kick:             make(chan KickRequest),
-		sessionUpdates:   make(chan SessionUpdate),
-		clients:          make(map[string]map[string]map[*Client]bool),
-		rideWatchers:     make(map[string]map[*Client]bool),
-		activeDriverRide: make(map[string]string),
-		currentSessions:  make(map[string]string),
-		LocStore:         locStore,
-		AuthStore:        authStore,
-		EventBus:         eventBus,
-		Safety:           safety.NewTracker(),
+		broadcast:          make(chan []byte),
+		register:           make(chan *Client),
+		unregister:         make(chan *Client),
+		kick:               make(chan KickRequest),
+		sessionUpdates:     make(chan SessionUpdate),
+		clients:            make(map[string]map[string]map[*Client]bool),
+		rideWatchers:       make(map[string]map[*Client]bool),
+		activeDriverRide:   make(map[string]string),
+		activeDriverStatus: make(map[string]ride.RideStatus),
+		currentSessions:    make(map[string]string),
+		LocStore:           locStore,
+		AuthStore:          authStore,
+		EventBus:           eventBus,
+		Safety:             safety.NewTracker(),
 	}
 }
 
 // SetSafetyDeps wires stopped-vehicle dependencies (called from main after stores exist).
-func (m *Manager) SetSafetyDeps(rideStore *ride.Store, adminStore *admin.Store, ambTypeNames map[string]string) {
+func (m *Manager) SetSafetyDeps(rideStore *ride.Store, adminStore *admin.Store, ambTypeNames map[string]string, stateStore *safety.StateStore) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.RideStore = rideStore
 	m.AdminStore = adminStore
 	m.AmbTypeNames = ambTypeNames
+	m.SafetyStore = stateStore
 	if m.Safety == nil {
 		m.Safety = safety.NewTracker()
+	}
+}
+
+func (m *Manager) SeedActiveRides(active []ride.ActiveDriverRide) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, item := range active {
+		m.activeDriverRide[item.DriverID] = item.RideID
+		m.activeDriverStatus[item.DriverID] = item.Status
+	}
+}
+
+func (m *Manager) SeedSafetyStates(states []safety.VehicleState) {
+	if m.Safety != nil {
+		m.Safety.Restore(states)
 	}
 }
 
@@ -411,26 +430,76 @@ func (m *Manager) SendToRideWatchers(rideID string, msgType string, payload inte
 
 func (m *Manager) SetActiveRide(driverID, rideID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.activeDriverRide[driverID] = rideID
+	m.activeDriverStatus[driverID] = ride.StatusAssigned
+	m.mu.Unlock()
 	if m.LocStore != nil {
-		m.LocStore.SetDriverStatus(driverID, "BUSY")
+		_ = m.LocStore.SetDriverStatus(driverID, "BUSY")
+		_ = m.LocStore.SetDriverRide(driverID, rideID)
 	}
-	if m.Safety != nil {
-		m.Safety.Reset(driverID)
+	m.resetSafetyState(driverID)
+}
+
+func (m *Manager) SetRideStatus(driverID, rideID string, status ride.RideStatus) {
+	if driverID == "" || rideID == "" {
+		return
+	}
+	m.mu.Lock()
+	if m.activeDriverRide[driverID] != rideID {
+		m.mu.Unlock()
+		return
+	}
+	previous := m.activeDriverStatus[driverID]
+	m.activeDriverStatus[driverID] = status
+	m.mu.Unlock()
+	if status == ride.StatusInProgress && previous != ride.StatusInProgress {
+		m.resetSafetyState(driverID)
 	}
 }
 
 func (m *Manager) ClearActiveRide(driverID string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.activeDriverRide, driverID)
+	delete(m.activeDriverStatus, driverID)
+	m.mu.Unlock()
 	if m.LocStore != nil {
-		m.LocStore.SetDriverStatus(driverID, "AVAILABLE")
+		_ = m.LocStore.SetDriverStatus(driverID, "AVAILABLE")
+		_ = m.LocStore.SetDriverRide(driverID, "")
 	}
+	m.resetSafetyState(driverID)
+}
+
+func (m *Manager) resetSafetyState(driverID string) {
 	if m.Safety != nil {
-		m.Safety.Reset(driverID)
+		m.Safety.ResetState(driverID)
 	}
+	m.deleteSafetyState(driverID)
+}
+
+func (m *Manager) deleteSafetyState(driverID string) {
+	if m.SafetyStore == nil || driverID == "" {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := m.SafetyStore.DeleteByDriver(ctx, driverID); err != nil {
+			logger.Log.Error().Err(err).Str("driver_id", driverID).Msg("Failed to clear stopped-vehicle state")
+		}
+	}()
+}
+
+func (m *Manager) persistSafetyState(state safety.VehicleState) {
+	if m.SafetyStore == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if err := m.SafetyStore.Upsert(ctx, state); err != nil {
+			logger.Log.Error().Err(err).Str("ride_id", state.RideID).Msg("Failed to persist stopped-vehicle state")
+		}
+	}()
 }
 
 // BroadcastToRole sends a message to every connected client with the given

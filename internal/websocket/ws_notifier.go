@@ -5,6 +5,7 @@ import (
 
 	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/logger"
+	"ambigo-backend/internal/ride"
 )
 
 // WSNotifier listens to ride events and sends WebSocket notifications.
@@ -28,6 +29,16 @@ func (n *WSNotifier) SubscribeTo(bus *eventbus.InMemoryBus) {
 	bus.Subscribe(eventbus.ChannelAuthSessionReplaced, n.handleSessionReplaced)
 	bus.Subscribe(eventbus.ChannelSafetyStoppedWarn, n.handleSafetyStoppedWarn)
 	bus.Subscribe(eventbus.ChannelSafetyStoppedAlarm, n.handleSafetyStoppedAlarm)
+	activityChannels := []string{
+		eventbus.ChannelRideRequested, eventbus.ChannelRideAccepted,
+		eventbus.ChannelRideArrived, eventbus.ChannelRideStarted,
+		eventbus.ChannelRideCompleted, eventbus.ChannelRideCancelled,
+		eventbus.ChannelRideDestinationChanged, eventbus.ChannelRideConditionUpdated,
+		eventbus.ChannelSafetyStoppedWarn, eventbus.ChannelSafetyStoppedAlarm,
+	}
+	for _, channel := range activityChannels {
+		bus.Subscribe(channel, n.handleAdminActivity)
+	}
 }
 
 // handleSessionReplaced records the replacing session and kicks every live
@@ -93,6 +104,7 @@ func (n *WSNotifier) handleRideAccepted(payload []byte) {
 		return
 	}
 	n.wsManager.SetActiveRide(p.DriverID, p.RideID)
+	n.broadcastFleetStatus(p.DriverID)
 	msg := map[string]string{"ride_id": p.RideID, "driver_id": p.DriverID, "status": p.Status}
 	n.wsManager.SendToClient("user", p.UserID, "RIDE_UPDATE", msg)
 	n.wsManager.SendToRideWatchers(p.RideID, "RIDE_UPDATE", msg)
@@ -104,6 +116,7 @@ func (n *WSNotifier) handleRideStatusChanged(payload []byte) {
 		logger.Log.Error().Err(err).Str("channel", "ride:status").Msg("Unmarshal error")
 		return
 	}
+	n.wsManager.SetRideStatus(p.DriverID, p.RideID, ride.RideStatus(p.Status))
 	msg := map[string]string{"ride_id": p.RideID, "status": p.Status}
 	n.wsManager.SendToRideWatchers(p.RideID, "RIDE_UPDATE", msg)
 }
@@ -115,6 +128,7 @@ func (n *WSNotifier) handleRideCompleted(payload []byte) {
 		return
 	}
 	n.wsManager.ClearActiveRide(p.DriverID)
+	n.broadcastFleetStatus(p.DriverID)
 	msg := map[string]interface{}{
 		"ride_id":          p.RideID,
 		"status":           "COMPLETED",
@@ -142,6 +156,7 @@ func (n *WSNotifier) handleRideCancelled(payload []byte) {
 	}
 	if p.DriverID != "" {
 		n.wsManager.ClearActiveRide(p.DriverID)
+		n.broadcastFleetStatus(p.DriverID)
 	}
 	msg := map[string]interface{}{"ride_id": p.RideID, "status": "CANCELLED"}
 	if p.Reason == "no_drivers" || p.Reason == "all_drivers_exhausted" {
@@ -164,11 +179,54 @@ func (n *WSNotifier) handleDriverLocationUpdate(payload []byte) {
 		logger.Log.Error().Err(err).Str("channel", "driver:location").Msg("Unmarshal error")
 		return
 	}
-	if p.RideID == "" {
+	if p.RideID != "" {
+		n.wsManager.SendToRideWatchers(p.RideID, "LOCATION_UPDATE", map[string]float64{
+			"lat": p.Lat, "lng": p.Lng,
+		})
+	}
+	adminUpdate := map[string]interface{}{
+		"driver_id":    p.DriverID,
+		"driver_name":  p.DriverName,
+		"lat":          p.Lat,
+		"lng":          p.Lng,
+		"ride_id":      p.RideID,
+		"status":       p.Status,
+		"vehicle_type": p.VehicleType,
+		"updated_at":   p.UpdatedAt,
+	}
+	if p.StoppedSince != "" {
+		adminUpdate["stopped_state"] = map[string]interface{}{
+			"ride_id": p.RideID, "driver_id": p.DriverID,
+			"stopped_since": p.StoppedSince, "stopped_seconds": p.StoppedSeconds, "stage": p.StoppedStage,
+		}
+	}
+	n.wsManager.BroadcastToRole("admin", EventFleetLocation, adminUpdate)
+}
+
+func (n *WSNotifier) broadcastFleetStatus(driverID string) {
+	if driver, ok := n.wsManager.LocStore.FleetDriver(driverID); ok {
+		n.wsManager.BroadcastToRole("admin", EventFleetStatus, driver)
+	}
+}
+
+func (n *WSNotifier) handleAdminActivity(payload []byte) {
+	var event map[string]interface{}
+	if err := json.Unmarshal(payload, &event); err != nil {
 		return
 	}
-	n.wsManager.SendToRideWatchers(p.RideID, "LOCATION_UPDATE", map[string]float64{
-		"lat": p.Lat, "lng": p.Lng,
+	channel, _ := event["_channel"].(string)
+	eventType, _ := event["_event"].(string)
+	createdAt, _ := event["_ts"].(string)
+	delete(event, "_channel")
+	delete(event, "_event")
+	delete(event, "_ts")
+	delete(event, "_request_id")
+	delete(event, "request_id")
+	n.wsManager.BroadcastToRole("admin", EventAdminActivity, map[string]interface{}{
+		"event_type": eventType,
+		"channel":    channel,
+		"payload":    event,
+		"created_at": createdAt,
 	})
 }
 

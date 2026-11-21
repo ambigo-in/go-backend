@@ -31,6 +31,10 @@ const (
 	ChannelAdminOfferCreated    = "admin:offer_created"
 	ChannelAdminOfferDeleted    = "admin:offer_deleted"
 	ChannelAdminDriverRejected  = "admin:driver_rejected"
+	ChannelAdminStaffCreated    = "admin:staff_created"
+	ChannelAdminStaffUpdated    = "admin:staff_updated"
+	ChannelAdminStaffToggled    = "admin:staff_toggled"
+	ChannelAdminStaffDeleted    = "admin:staff_deleted"
 	ChannelReferralCredited     = "referral:credited"
 	ChannelSafetyStoppedWarn    = "safety:stopped_warning"
 	ChannelSafetyStoppedAlarm   = "safety:stopped_emergency"
@@ -39,6 +43,11 @@ const (
 	// other hospital. The user must learn the new destination even with
 	// the app in background (FCM) — no re-fetch required (full payload).
 	ChannelRideDestinationChanged = "ride:destination_changed"
+	// ChannelRideConditionUpdated is published when a patient condition level
+	// is updated during an active ride (stable/serious/critical/worsening) by
+	// the user or an assigned attendant. The SOS/condition queue and history
+	// depend on this event (audit + analytics).
+	ChannelRideConditionUpdated = "ride:condition_updated"
 )
 
 // RideDestinationChangedPayload carries the complete new destination so the
@@ -54,6 +63,21 @@ type RideDestinationChangedPayload struct {
 	DropAddress  string  `json:"drop_address"`
 	FromHospital string  `json:"from_hospital_id,omitempty"`
 	Status       string  `json:"status,omitempty"`
+	RequestID    string  `json:"request_id,omitempty"`
+}
+
+// RideConditionUpdatedPayload is published when a patient condition level is
+// updated during an active ride by the user or an assigned attendant.
+type RideConditionUpdatedPayload struct {
+	RideID     string `json:"ride_id"`
+	UserID     string `json:"user_id,omitempty"`
+	DriverID   string `json:"driver_id,omitempty"`
+	HospitalID string `json:"hospital_id,omitempty"`
+	Level      string `json:"level"` // stable | serious | critical | worsening
+	Severity   int    `json:"severity,omitempty"`
+	Note       string `json:"note,omitempty"`
+	Source     string `json:"source"` // user | attendant
+	RequestID  string `json:"request_id,omitempty"`
 }
 
 // RideRequestedPayload is published when a user requests a ride
@@ -239,11 +263,18 @@ type WalletWithdrawalPayload struct {
 
 // DriverLocationUpdatePayload is published when a driver sends a GPS ping
 type DriverLocationUpdatePayload struct {
-	DriverID  string  `json:"driver_id"`
-	Lat       float64 `json:"lat"`
-	Lng       float64 `json:"lng"`
-	RideID    string  `json:"ride_id,omitempty"`
-	RequestID string  `json:"request_id,omitempty"`
+	DriverID       string  `json:"driver_id"`
+	DriverName     string  `json:"driver_name,omitempty"`
+	Lat            float64 `json:"lat"`
+	Lng            float64 `json:"lng"`
+	RideID         string  `json:"ride_id,omitempty"`
+	Status         string  `json:"status"`
+	VehicleType    string  `json:"vehicle_type,omitempty"`
+	UpdatedAt      string  `json:"updated_at"`
+	StoppedSince   string  `json:"stopped_since,omitempty"`
+	StoppedSeconds int64   `json:"stopped_seconds,omitempty"`
+	StoppedStage   string  `json:"stopped_stage,omitempty"`
+	RequestID      string  `json:"request_id,omitempty"`
 }
 
 // AdminAmbTypePayload is published for ambulance type CRUD events
@@ -270,6 +301,17 @@ type AdminOfferPayload struct {
 // AdminDriverRejectedPayload is published when an admin rejects a driver
 type AdminDriverRejectedPayload struct {
 	DriverID  string `json:"driver_id"`
+	RequestID string `json:"request_id,omitempty"`
+}
+
+// AdminStaffPayload is published for staff/admin CRUD events
+type AdminStaffPayload struct {
+	AdminID   string `json:"admin_id"`
+	Username  string `json:"username"`
+	Name      string `json:"name"`
+	Role      string `json:"role"`
+	Action    string `json:"action"` // created, updated, toggled, deleted
+	ActorID   string `json:"actor_id,omitempty"`
 	RequestID string `json:"request_id,omitempty"`
 }
 
@@ -333,4 +375,37 @@ func ShortRideRef(rideID string) string {
 		return s
 	}
 	return s[len(s)-6:]
+}
+
+// CanonicalEventName converts a channel name to its underscore event name
+// ("ride:driver_offered" -> "ride_driver_offered"). Single source of truth
+// for the envelope's _event field so every sink logs the same event name.
+func CanonicalEventName(channel string) string {
+	return strings.ReplaceAll(channel, ":", "_")
+}
+
+// AnalyticsChannels lists the channels whose events belong in the analytics
+// stream (Axiom today, BigQuery next). Excludes driver:location_updated by
+// policy (~1 ping per 3s per driver would flood the stream; location data
+// lives in the H3 store). Subscribers must not maintain their own list —
+// use this one so coverage cannot drift.
+func AnalyticsChannels() []string {
+	return []string{
+		ChannelRideRequested, ChannelRideDriverOffered, ChannelRideWithdrawn,
+		ChannelRideAccepted, ChannelRideArrived, ChannelRideStarted,
+		ChannelRideCompleted, ChannelRideCancelled,
+		ChannelRideDestinationChanged, ChannelRideConditionUpdated,
+		ChannelAuthOTPRequested, ChannelAuthUserRegistered, ChannelAuthUserLoggedIn,
+		ChannelAuthDriverCreated, ChannelAuthDriverLoggedIn, ChannelAuthDriverApproved,
+		ChannelAuthSessionReplaced, ChannelAuthLoggedOut,
+		ChannelPaymentCompleted, ChannelWalletWithdrawal,
+		ChannelAdminAmbTypeCreated, ChannelAdminAmbTypeDeleted,
+		ChannelAdminHospitalAdded, ChannelAdminHospitalUpdated, ChannelAdminHospitalDeleted,
+		ChannelAdminOfferCreated, ChannelAdminOfferDeleted,
+		ChannelAdminDriverRejected,
+		ChannelAdminStaffCreated, ChannelAdminStaffUpdated,
+		ChannelAdminStaffToggled, ChannelAdminStaffDeleted,
+		ChannelReferralCredited,
+		ChannelSafetyStoppedWarn, ChannelSafetyStoppedAlarm,
+	}
 }

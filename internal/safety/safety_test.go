@@ -74,3 +74,44 @@ func TestTrackerRideChangeResets(t *testing.T) {
 		t.Fatalf("expected none after explicit reset, got %v", a)
 	}
 }
+
+func TestTrackerRestorePreservesElapsedAndStage(t *testing.T) {
+	tr := NewTrackerWithThresholds(3*time.Minute, 5*time.Minute, 50)
+	base := time.Now()
+	tr.Restore([]VehicleState{{
+		RideID: "r1", DriverID: "d1", AnchorLat: 17.0, AnchorLng: 78.0,
+		StoppedSince: base, Warned: true,
+	}})
+
+	action, elapsed, state, changed := tr.CheckState("d1", "r1", 17.0, 78.0, base.Add(4*time.Minute))
+	if action != ActionNone || changed || elapsed != 4*time.Minute || !state.Warned {
+		t.Fatalf("restored warning state was not preserved: action=%v elapsed=%v changed=%v state=%+v", action, elapsed, changed, state)
+	}
+
+	action, elapsed, state, changed = tr.CheckState("d1", "r1", 17.0, 78.0, base.Add(5*time.Minute))
+	if action != ActionEscalate || !changed || elapsed != 5*time.Minute || !state.Escalated {
+		t.Fatalf("restored timer did not escalate on schedule: action=%v elapsed=%v changed=%v state=%+v", action, elapsed, changed, state)
+	}
+	view := state.View(base.Add(5 * time.Minute))
+	if view.Stage != "emergency" || view.StoppedSeconds != 300 {
+		t.Fatalf("unexpected state view: %+v", view)
+	}
+}
+
+func TestTrackerCheckStateMarksOnlyPersistentChanges(t *testing.T) {
+	tr := NewTrackerWithThresholds(3*time.Minute, 5*time.Minute, 50)
+	base := time.Now()
+
+	_, _, _, changed := tr.CheckState("d1", "r1", 17.0, 78.0, base)
+	if !changed {
+		t.Fatal("new anchor must be persisted")
+	}
+	_, _, _, changed = tr.CheckState("d1", "r1", 17.0, 78.0, base.Add(time.Minute))
+	if changed {
+		t.Fatal("stationary ping before a stage change must not be persisted")
+	}
+	_, _, moved, changed := tr.CheckState("d1", "r1", 17.001, 78.0, base.Add(2*time.Minute))
+	if !changed || moved.StoppedSince != base.Add(2*time.Minute) {
+		t.Fatalf("movement reset must be persisted: changed=%v state=%+v", changed, moved)
+	}
+}

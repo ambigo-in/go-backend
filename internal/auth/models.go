@@ -18,6 +18,7 @@ type User struct {
 	Location       *GeoJSONPoint `db:"location" json:"location,omitempty"`
 	FCMToken       *string       `db:"fcm_token" json:"fcm_token,omitempty"`
 	JWTToken       *string       `db:"jwt_token" json:"jwt_token,omitempty"`
+	CreatedAt      time.Time     `db:"created_at" json:"created_at"`
 }
 
 type DriverDetails struct {
