@@ -12,11 +12,64 @@ import (
 	"ambigo-backend/internal/safety"
 )
 
+// rideRecoveryInterval bounds how often a driver with no in-memory ride state
+// triggers a DB lookup. Idle drivers (no active ride) pay at most one lookup
+// per interval instead of one per GPS ping.
+const rideRecoveryInterval = 30 * time.Second
+
+// recoverActiveRide rebuilds the driver->ride mapping from persistent state.
+// Called when the in-memory map has no entry (backend restart, failed startup
+// seed). Returns ("", "") when the driver has no active ride.
+func (m *Manager) recoverActiveRide(driverID string) (string, ride.RideStatus) {
+	if m.RideStore == nil || driverID == "" {
+		return "", ""
+	}
+
+	m.rideRecoveryMu.Lock()
+	if m.rideRecovery == nil {
+		m.rideRecovery = make(map[string]time.Time)
+	}
+	if last, ok := m.rideRecovery[driverID]; ok && time.Since(last) < rideRecoveryInterval {
+		m.rideRecoveryMu.Unlock()
+		return "", ""
+	}
+	m.rideRecovery[driverID] = time.Now()
+	m.rideRecoveryMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	active, err := m.RideStore.GetCurrentRide(ctx, driverID, "driver")
+	if err != nil || active == nil {
+		return "", ""
+	}
+
+	m.mu.Lock()
+	// Re-check: a concurrent SetActiveRide may have won the race.
+	if m.activeDriverRide[driverID] == "" {
+		m.activeDriverRide[driverID] = active.ID
+		m.activeDriverStatus[driverID] = active.Status
+	}
+	rideID := m.activeDriverRide[driverID]
+	status := m.activeDriverStatus[driverID]
+	m.mu.Unlock()
+
+	// Recovered: drop the throttle entry so a later loss re-queries promptly.
+	m.rideRecoveryMu.Lock()
+	delete(m.rideRecovery, driverID)
+	m.rideRecoveryMu.Unlock()
+
+	logger.Log.Info().Str("driver_id", driverID).Str("ride_id", rideID).Str("status", string(status)).Msg("Recovered active ride from store")
+	return rideID, status
+}
+
 // handleLocationUpdate processes incoming continuous GPS pings from Drivers
 // and stores them directly into the high-performance H3 Location Store.
 func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) {
-	// Only drivers should be sending location updates to the grid
-	if client.Role != "driver" {
+	// Only drivers should be sending location updates to the grid.
+	// Unverified drivers are still drivers for GPS purposes: their JWT carries
+	// "unvrf_driver" and dropping their pings silently left active riders with
+	// no LOCATION_UPDATE / ETA at all.
+	if client.Role != "driver" && client.Role != "unvrf_driver" {
 		return
 	}
 
@@ -49,6 +102,13 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 	rideStatus := m.activeDriverStatus[client.ID]
 	m.mu.RUnlock()
 
+	// Rehydrate after a restart/redeploy: the in-memory driver->ride map is
+	// empty until clients reconnect, so without this the ping is published
+	// with RideID="" and watchers never receive location or ETA updates.
+	if rideID == "" {
+		rideID, rideStatus = m.recoverActiveRide(client.ID)
+	}
+
 	if rideID != "" {
 		currentStatus, _ := m.LocStore.GetDriverStatus(client.ID)
 		if currentStatus != "BUSY" {
@@ -65,6 +125,19 @@ func (m *Manager) handleLocationUpdate(client *Client, payload json.RawMessage) 
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			_ = m.RideStore.InsertTrailPoint(ctx, rideID, lat, lng)
+		}()
+	}
+
+	if rideID != "" && m.ETAEngine != nil {
+		driverID := client.ID
+		curLat, curLng := update.Lat, update.Lng
+		curStatus := rideStatus
+		go func() {
+			if etaPayload := m.ETAEngine.OnDriverLocation(rideID, driverID, curLat, curLng, curStatus); etaPayload != nil {
+				if m.EventBus != nil {
+					m.EventBus.PublishEvent(eventbus.ChannelRideETAUpdate, *etaPayload)
+				}
+			}
 		}()
 	}
 

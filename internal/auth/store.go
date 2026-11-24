@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"strings"
 	"time"
 
 	"ambigo-backend/internal/ids"
@@ -221,11 +222,13 @@ func scanHospitalReceptionistRow(row pgx.Row) (*HospitalReceptionist, error) {
 	var mobile *string
 	var jwtToken *string
 	var email *string
+	var role sql.NullString
+	var roleID *string
 	var status sql.NullString
 	var mustChange sql.NullBool
 	var invitedAt sql.NullTime
 	var id, hospitalID, createdByMDID string
-	err := row.Scan(&id, &hospitalID, &createdByMDID, &r.Name, &r.Username, &r.PasswordHash, &mobile, &r.Active, &r.CreatedAt, &jwtToken, &email, &status, &mustChange, &invitedAt)
+	err := row.Scan(&id, &hospitalID, &createdByMDID, &r.Name, &r.Username, &r.PasswordHash, &mobile, &r.Active, &r.CreatedAt, &jwtToken, &email, &status, &mustChange, &invitedAt, &role, &roleID)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +238,12 @@ func scanHospitalReceptionistRow(row pgx.Row) (*HospitalReceptionist, error) {
 	r.Mobile = mobile
 	r.JWTToken = jwtToken
 	r.Email = email
+	if role.Valid && strings.TrimSpace(role.String) != "" {
+		r.Role = role.String
+	} else {
+		r.Role = "Staff"
+	}
+	r.RoleID = roleID
 	if status.Valid {
 		r.Status = status.String
 	} else if r.Active {
@@ -1625,7 +1634,7 @@ func (s *Store) DeleteHospitalMD(ctx context.Context, id string) error {
 	return err
 }
 
-// ---- Hospital Receptionist (Phase 2) ----
+// ---- Hospital Receptionist / Staff (Phase 2) ----
 
 func (s *Store) CreateHospitalReceptionist(ctx context.Context, r *HospitalReceptionist) error {
 	r.ID = ids.New()
@@ -1636,13 +1645,16 @@ func (s *Store) CreateHospitalReceptionist(ctx context.Context, r *HospitalRecep
 		r.Status = "invited"
 	}
 	r.MustChangePassword = true
-	_, err := s.pool.Exec(ctx, `INSERT INTO hospital_receptionists (id, hospital_id, created_by_md_id, name, username, password_hash, mobile, active, jwt_token, created_at, email, status, must_change_password, invited_at) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
-		r.ID, r.HospitalID, r.CreatedByMDID, r.Name, r.Username, r.PasswordHash, r.Mobile, r.Active, r.JWTToken, r.CreatedAt, r.Email, r.Status, r.MustChangePassword, r.InvitedAt)
+	if strings.TrimSpace(r.Role) == "" {
+		r.Role = "Staff"
+	}
+	_, err := s.pool.Exec(ctx, `INSERT INTO hospital_receptionists (id, hospital_id, created_by_md_id, name, username, password_hash, mobile, active, jwt_token, created_at, email, status, must_change_password, invited_at, role, role_id) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16::uuid)`,
+		r.ID, r.HospitalID, r.CreatedByMDID, r.Name, r.Username, r.PasswordHash, r.Mobile, r.Active, r.JWTToken, r.CreatedAt, r.Email, r.Status, r.MustChangePassword, r.InvitedAt, r.Role, r.RoleID)
 	return err
 }
 
 func (s *Store) FindHospitalReceptionistByUsername(ctx context.Context, username string) (*HospitalReceptionist, error) {
-	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE username=$1`, username)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at, role, role_id::text FROM hospital_receptionists WHERE username=$1`, username)
 	r, err := scanHospitalReceptionistRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1654,7 +1666,7 @@ func (s *Store) FindHospitalReceptionistByUsername(ctx context.Context, username
 }
 
 func (s *Store) FindHospitalReceptionistByEmail(ctx context.Context, email string) (*HospitalReceptionist, error) {
-	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE email=$1`, email)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at, role, role_id::text FROM hospital_receptionists WHERE email=$1`, email)
 	r, err := scanHospitalReceptionistRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1669,7 +1681,7 @@ func (s *Store) FindHospitalReceptionistByID(ctx context.Context, id string) (*H
 	if !ids.IsValid(id) {
 		return nil, fmt.Errorf("invalid id: %s", id)
 	}
-	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE id=$1::uuid`, id)
+	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at, role, role_id::text FROM hospital_receptionists WHERE id=$1::uuid`, id)
 	r, err := scanHospitalReceptionistRow(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -1684,7 +1696,7 @@ func (s *Store) ListReceptionistsByHospital(ctx context.Context, hospitalID stri
 	if !ids.IsValid(hospitalID) {
 		return nil, fmt.Errorf("invalid id: %s", hospitalID)
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at FROM hospital_receptionists WHERE hospital_id=$1::uuid`, hospitalID)
+	rows, err := s.pool.Query(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, username, password_hash, mobile, active, created_at, jwt_token, email, status, must_change_password, invited_at, role, role_id::text FROM hospital_receptionists WHERE hospital_id=$1::uuid`, hospitalID)
 	if err != nil {
 		return nil, err
 	}
@@ -1748,6 +1760,71 @@ func (s *Store) SetReceptionistTempPassword(ctx context.Context, id string, hash
 		return fmt.Errorf("invalid id: %s", id)
 	}
 	_, err := s.pool.Exec(ctx, `UPDATE hospital_receptionists SET password_hash=$2, must_change_password=true, status='invited', active=true, invited_at=now() WHERE id=$1::uuid`, id, hash)
+	return err
+}
+
+// ---- Hospital Staff Roles ----
+
+func (s *Store) CreateHospitalStaffRole(ctx context.Context, role *HospitalStaffRole) error {
+	if role.ID == "" {
+		role.ID = ids.New()
+	}
+	role.CreatedAt = time.Now()
+	role.UpdatedAt = time.Now()
+	role.Active = true
+	_, err := s.pool.Exec(ctx, `INSERT INTO hospital_staff_roles (id, hospital_id, created_by_md_id, name, description, active, created_at, updated_at) VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8)`,
+		role.ID, role.HospitalID, role.CreatedByMDID, role.Name, role.Description, role.Active, role.CreatedAt, role.UpdatedAt)
+	return err
+}
+
+func (s *Store) ListHospitalStaffRoles(ctx context.Context, hospitalID string) ([]HospitalStaffRole, error) {
+	if !ids.IsValid(hospitalID) {
+		return nil, fmt.Errorf("invalid hospital id: %s", hospitalID)
+	}
+	rows, err := s.pool.Query(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, description, active, created_at, updated_at FROM hospital_staff_roles WHERE hospital_id=$1::uuid ORDER BY created_at ASC`, hospitalID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []HospitalStaffRole
+	for rows.Next() {
+		var sr HospitalStaffRole
+		var desc *string
+		if err := rows.Scan(&sr.ID, &sr.HospitalID, &sr.CreatedByMDID, &sr.Name, &desc, &sr.Active, &sr.CreatedAt, &sr.UpdatedAt); err != nil {
+			return nil, err
+		}
+		sr.Description = desc
+		list = append(list, sr)
+	}
+	if list == nil {
+		list = []HospitalStaffRole{}
+	}
+	return list, rows.Err()
+}
+
+func (s *Store) FindHospitalStaffRoleByID(ctx context.Context, id string) (*HospitalStaffRole, error) {
+	if !ids.IsValid(id) {
+		return nil, fmt.Errorf("invalid id: %s", id)
+	}
+	row := s.pool.QueryRow(ctx, `SELECT id::text, hospital_id::text, created_by_md_id::text, name, description, active, created_at, updated_at FROM hospital_staff_roles WHERE id=$1::uuid`, id)
+	var sr HospitalStaffRole
+	var desc *string
+	if err := row.Scan(&sr.ID, &sr.HospitalID, &sr.CreatedByMDID, &sr.Name, &desc, &sr.Active, &sr.CreatedAt, &sr.UpdatedAt); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	sr.Description = desc
+	return &sr, nil
+}
+
+func (s *Store) DeleteHospitalStaffRole(ctx context.Context, id string) error {
+	if !ids.IsValid(id) {
+		return fmt.Errorf("invalid id: %s", id)
+	}
+	_, err := s.pool.Exec(ctx, `DELETE FROM hospital_staff_roles WHERE id=$1::uuid`, id)
 	return err
 }
 

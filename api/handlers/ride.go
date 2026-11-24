@@ -647,22 +647,30 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 			} else {
 				billKm := trailKm
 				billSecs := 0
+				endedAtPickup := false
 				// Moved drop: need road distance pickup->final (1 Routes call).
 				// Same-drop detour: trail already proves it, no API cost.
-				if dropMovedM >= ride.DropGateMeters && h.RouteClient != nil {
+				if dropMovedM >= ride.DropGateMeters {
 					pickupLng, pickupLat := rideData.Pickup.Coordinates[0], rideData.Pickup.Coordinates[1]
-					rctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
-					route, rerr := h.RouteClient.CalculateETA(rctx, pickupLat, pickupLng, finalLat, finalLng)
-					cancel()
-					if rerr == nil && route != nil && route.DistanceKm > 0 {
-						if route.DistanceKm > billKm {
-							billKm = route.DistanceKm
+					distFromPickupM := ride.HaversineKm(pickupLat, pickupLng, finalLat, finalLng) * 1000.0
+					if distFromPickupM < 200.0 {
+						// Ended at or immediately around pickup (<200m) -> 0 km extra travel, Base Fare applies.
+						endedAtPickup = true
+						billKm = 0.0
+					} else if h.RouteClient != nil {
+						rctx, cancel := context.WithTimeout(r.Context(), 3*time.Second)
+						route, rerr := h.RouteClient.CalculateETA(rctx, pickupLat, pickupLng, finalLat, finalLng)
+						cancel()
+						if rerr == nil && route != nil && route.DistanceKm > 0 {
+							if route.DistanceKm > billKm {
+								billKm = route.DistanceKm
+							}
+							billSecs = route.DurationSeconds
+							recalcPoly = route.Polyline
 						}
-						billSecs = route.DurationSeconds
-						recalcPoly = route.Polyline
 					}
 				}
-				if billKm <= 0 {
+				if billKm <= 0 && !endedAtPickup {
 					billKm = estimateKm
 				}
 				if ambType, aerr := h.AdminStore.GetAmbulanceTypeByID(r.Context(), *rideData.AmbTypeID); aerr == nil && ambType != nil {
@@ -676,10 +684,12 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 					// Prefer saved ride region (pickup region locked at request).
 					if h.RegionStore != nil {
 						if rid, rerr := h.Dispatcher.RideStore.GetRideRegionID(r.Context(), rideID); rerr == nil && rid != nil && *rid != "" {
-							if rp, perr := h.RegionStore.GetRegionPrice(r.Context(), *rid, ambType.ID); perr == nil && rp != nil {
+							if rp, perr := h.RegionStore.GetRegionPriceWithParent(r.Context(), *rid, ambType.ID); perr == nil && rp != nil {
 								effBase, tiers, effShare = rp.BaseFare, rp.PricingTier, rp.DriverShare
 							}
-						} else if len(rideData.Pickup.Coordinates) == 2 {
+						}
+						// If rid was missing or didn't yield an override, resolve using pickup coordinates
+						if (effBase == ambType.BaseFare && len(tiers) == len(ambType.PricingTier)) && len(rideData.Pickup.Coordinates) == 2 {
 							if res, rerr := h.RegionStore.ResolvePriceForPickup(r.Context(), rideData.Pickup.Coordinates[1], rideData.Pickup.Coordinates[0], ambType.ID, effBase, tiers, effShare, ambType.ListingThreshold, ambType.HelperIncluded, ambType.OTPRequired); rerr == nil && res != nil && res.IsOverride {
 								effBase, tiers, effShare = res.BaseFare, res.Tiers, res.DriverShare
 							}
@@ -691,6 +701,10 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 					ngt := h.PricingEngine.CalculateNightSurcharge(base, time.Now(), nightMult)
 					total := payment.RoundRupees(base + emg + ngt)
 					share := payment.RoundRupees(total * effShare / 100.0)
+					if billKm >= lockedKm && total < lockedTotal {
+						total = lockedTotal
+						share = lockedShare
+					}
 					if total > 0 {
 						finalAmount = total
 						lockedShare = share
@@ -750,11 +764,17 @@ func (h *RideHandler) HandleComplete(w http.ResponseWriter, r *http.Request) {
 		extraKm = payment.RoundRupees(extraKm*10) / 10 // 1 decimal
 		switch recalcReason {
 		case "drop_moved":
-			fareNote = fmt.Sprintf("Ended %.1f km past the planned drop", extraKm)
+			if extraKm > 0 {
+				fareNote = fmt.Sprintf("Ended %.1f km past the planned drop", extraKm)
+			}
 		case "detour":
-			fareNote = fmt.Sprintf("Route was %.1f km longer than estimated", extraKm)
+			if extraKm > 0 {
+				fareNote = fmt.Sprintf("Route was %.1f km longer than estimated", extraKm)
+			}
 		default:
-			fareNote = fmt.Sprintf("Adjusted for %.1f km extra travel", extraKm)
+			if extraKm > 0 {
+				fareNote = fmt.Sprintf("Adjusted for %.1f km extra travel", extraKm)
+			}
 		}
 	}
 
@@ -1285,8 +1305,31 @@ func (h *RideHandler) HandleGetDriverDetails(w http.ResponseWriter, r *http.Requ
 		}
 	}
 
+	// Live driver position: the accepted screen needs an initial fix to compute
+	// the "driver on the way" ETA before any LOCATION_UPDATE frame arrives.
+	// Prefer the realtime store; fall back to the last persisted fix only when
+	// it is fresh, so a stale row can never seed a wildly wrong ETA.
+	if lat, lng, ok := h.liveDriverLocation(*rideData.DriverID); ok {
+		driver.Location = &auth.GeoJSONPoint{Type: "Point", Coordinates: []float64{lng, lat}}
+	} else if driver.LastLocationUpdate == nil || time.Since(*driver.LastLocationUpdate) > 2*time.Minute {
+		driver.Location = nil
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(driver)
+}
+
+// liveDriverLocation returns the driver's current GPS fix from the realtime
+// store. ok is false when the driver has no live position.
+func (h *RideHandler) liveDriverLocation(driverID string) (lat, lng float64, ok bool) {
+	if driverID == "" || h.Dispatcher == nil || h.Dispatcher.Matcher == nil || h.Dispatcher.Matcher.LocStore == nil {
+		return 0, 0, false
+	}
+	lat, lng, err := h.Dispatcher.Matcher.LocStore.GetLocation(driverID)
+	if err != nil || (lat == 0 && lng == 0) {
+		return 0, 0, false
+	}
+	return lat, lng, true
 }
 
 // HandleGetUserDetails is used by the Driver App to get the user's info
@@ -1352,9 +1395,15 @@ func (h *RideHandler) HandleRoutePreview(w http.ResponseWriter, r *http.Request)
 	rctx, cancel := context.WithTimeout(r.Context(), 8*time.Second)
 	defer cancel()
 	route, err := h.RouteClient.CalculateETA(rctx, req.OriginLat, req.OriginLng, req.DestLat, req.DestLng)
-	if err != nil {
-		response.Error(w, "Failed to compute route: "+err.Error(), http.StatusInternalServerError)
-		return
+	if err != nil || route == nil {
+		// Ride screens poll this endpoint for their ETA: degrading to a
+		// straight-line estimate keeps them alive instead of leaving
+		// "Calculating..." forever on a transient upstream failure.
+		if err != nil {
+			logger.Log.Warn().Err(err).Msg("route preview failed, serving straight-line fallback")
+		}
+		km := ride.HaversineKm(req.OriginLat, req.OriginLng, req.DestLat, req.DestLng) * 1.35
+		route = &ride.Route{DistanceKm: km, DurationSeconds: int((km / 38.0) * 3600.0)}
 	}
 
 	coords := ride.DecodePolyline(route.Polyline)

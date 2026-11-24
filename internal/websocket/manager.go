@@ -97,10 +97,22 @@ type Manager struct {
 	Safety      *safety.Tracker
 	SafetyStore *safety.StateStore
 
+	// ETAEngine computes canonical server-side ETAs for active rides.
+	ETAEngine interface {
+		OnDriverLocation(rideID, driverID string, lat, lng float64, status ride.RideStatus) *eventbus.RideETAUpdatePayload
+		ClearRide(rideID string)
+		GetLatestETA(rideID string) *eventbus.RideETAUpdatePayload
+	}
+
 	// locThrottle caps location fan-out: max 1 bus event per driver per
 	// interval (giants: ~1 per 3s). Extra pings still update the store.
 	locThrottleMu sync.Mutex
 	locThrottle   map[string]time.Time
+
+	// rideRecovery throttles DB rehydration of a driver's active ride when the
+	// in-memory map was lost (restart) — see recoverActiveRide.
+	rideRecoveryMu sync.Mutex
+	rideRecovery   map[string]time.Time
 }
 
 // LocationPublishInterval is the minimum gap between location bus events for
@@ -226,13 +238,31 @@ func (m *Manager) Run() {
 			if m.clients[client.Role][client.ID] == nil {
 				m.clients[client.Role][client.ID] = make(map[*Client]bool)
 			}
-			// Same-session reconnect: evict the stale duplicate so one device
-			// never accumulates watchers that multiply every fan-out.
-			// Silent by operator choice: no log line here (routine path).
+			// Same-session reconnect: allow up to 2 concurrent sockets per session
+			// (e.g. Flutter UI isolate + background location service isolate).
+			// If 2 or more already exist, evict the oldest non-watcher duplicate.
+			sessionClients := make([]*Client, 0)
 			for oldClient := range m.clients[client.Role][client.ID] {
 				if oldClient.SessionID == client.SessionID {
-					m.removeClientLocked(oldClient)
+					sessionClients = append(sessionClients, oldClient)
 				}
+			}
+			if len(sessionClients) >= 2 {
+				var targetToEvict *Client = sessionClients[0]
+				for _, sc := range sessionClients {
+					isWatcher := false
+					for _, watchers := range m.rideWatchers {
+						if watchers[sc] {
+							isWatcher = true
+							break
+						}
+					}
+					if !isWatcher {
+						targetToEvict = sc
+						break
+					}
+				}
+				m.removeClientLocked(targetToEvict)
 			}
 			// Eviction above may have deleted the now-empty inner map.
 			if m.clients[client.Role][client.ID] == nil {
@@ -459,6 +489,7 @@ func (m *Manager) SetRideStatus(driverID, rideID string, status ride.RideStatus)
 
 func (m *Manager) ClearActiveRide(driverID string) {
 	m.mu.Lock()
+	rideID := m.activeDriverRide[driverID]
 	delete(m.activeDriverRide, driverID)
 	delete(m.activeDriverStatus, driverID)
 	m.mu.Unlock()
@@ -467,6 +498,9 @@ func (m *Manager) ClearActiveRide(driverID string) {
 		_ = m.LocStore.SetDriverRide(driverID, "")
 	}
 	m.resetSafetyState(driverID)
+	if m.ETAEngine != nil && rideID != "" {
+		m.ETAEngine.ClearRide(rideID)
+	}
 }
 
 func (m *Manager) resetSafetyState(driverID string) {
@@ -562,6 +596,20 @@ func (m *Manager) HandleIncomingMessage(client *Client, message []byte) {
 		}
 		m.rideWatchers[payload.RideID][client] = true
 		m.mu.Unlock()
+
+		// Instant ETA Push: seed this watcher with the latest known ETA immediately
+		if m.ETAEngine != nil {
+			if etaPayload := m.ETAEngine.GetLatestETA(payload.RideID); etaPayload != nil {
+				if payloadBytes, err := json.Marshal(etaPayload); err == nil {
+					if msgBytes, err := json.Marshal(BaseMessage{Type: EventRideETAUpdate, Payload: payloadBytes}); err == nil {
+						select {
+						case client.Send <- msgBytes:
+						default:
+						}
+					}
+				}
+			}
+		}
 	case EventRideDeclined:
 		var payload struct {
 			RideID string `json:"ride_id"`

@@ -20,6 +20,7 @@ const (
 	EventDestinationChanged = "DESTINATION_CHANGED"
 	EventRideReassignedAway = "RIDE_REASSIGNED_AWAY"
 	EventNewIncoming        = "NEW_INCOMING"
+	EventRideETAUpdate      = "RIDE_ETA_UPDATE"
 )
 
 // BaseMessage is the generic envelope for all websocket communications

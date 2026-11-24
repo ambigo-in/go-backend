@@ -98,12 +98,15 @@ func (h *HospitalDashboardHandler) HandleHospitalIncomingRides(w http.ResponseWr
 // all resolved server-side so the portal never shows raw IDs).
 type enrichedRide struct {
 	*ride.Ride
-	DriverLocation  *admin.GeoJSON   `json:"driver_location,omitempty"`
+	DriverLocation  *admin.GeoJSON  `json:"driver_location,omitempty"`
 	Readiness       *ride.Readiness `json:"readiness,omitempty"`
 	AmbTypeName     string          `json:"amb_type_name,omitempty"`
+	AttendantName   string          `json:"attendant_name,omitempty"`
 	AttendantMobile string          `json:"attendant_mobile,omitempty"`
 	DriverName      string          `json:"driver_name,omitempty"`
 	DriverMobile    string          `json:"driver_mobile,omitempty"`
+	UserName        string          `json:"user_name,omitempty"`
+	UserMobile      string          `json:"user_mobile,omitempty"`
 }
 
 // enrichRides batches readiness, ambulance names, driver identity, attendant
@@ -129,6 +132,12 @@ func (h *HospitalDashboardHandler) enrichRides(ctx context.Context, rides []*rid
 	out := make([]enrichedRide, 0, len(rides))
 	for _, rd := range rides {
 		er := enrichedRide{Ride: rd, Readiness: readinessByRide[rd.ID]}
+		if rd.UserID != "" {
+			if u, err := h.AuthStore.FindUserByID(ctx, rd.UserID); err == nil && u != nil {
+				er.UserName = u.Name
+				er.UserMobile = u.Mobile
+			}
+		}
 		if rd.AmbTypeID != nil {
 			er.AmbTypeName = nameByAmbID[*rd.AmbTypeID]
 		}
@@ -140,11 +149,13 @@ func (h *HospitalDashboardHandler) enrichRides(ctx context.Context, rides []*rid
 			if atts, err := h.AuthStore.ListAttendantsByDriver(ctx, *rd.DriverID); err == nil {
 				for _, a := range atts {
 					if a.Active && a.Mobile != "" {
+						er.AttendantName = a.Name
 						er.AttendantMobile = a.Mobile
 						break
 					}
 				}
 				if er.AttendantMobile == "" && len(atts) > 0 {
+					er.AttendantName = atts[0].Name
 					er.AttendantMobile = atts[0].Mobile
 				}
 			}
@@ -218,6 +229,11 @@ func (h *HospitalDashboardHandler) HandleHospitalRideDetail(w http.ResponseWrite
 		rideDoc.ConditionUpdates = ups
 	}
 	w.Header().Set("Content-Type", "application/json")
+	enriched := h.enrichRides(r.Context(), []*ride.Ride{rideDoc})
+	if len(enriched) > 0 {
+		json.NewEncoder(w).Encode(enriched[0])
+		return
+	}
 	json.NewEncoder(w).Encode(rideDoc)
 }
 

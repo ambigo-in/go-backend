@@ -163,6 +163,19 @@ type HospitalReceptionist struct {
 	InvitedAt          time.Time `db:"invited_at" json:"invited_at"`
 	CreatedAt          time.Time `db:"created_at" json:"created_at"`
 	JWTToken           *string   `db:"jwt_token" json:"jwt_token,omitempty"`
+	Role               string    `db:"role" json:"role"`
+	RoleID             *string   `db:"role_id" json:"role_id,omitempty"`
+}
+
+type HospitalStaffRole struct {
+	ID            string    `db:"id" json:"id"`
+	HospitalID    string    `db:"hospital_id" json:"hospital_id"`
+	CreatedByMDID string    `db:"created_by_md_id" json:"created_by_md_id"`
+	Name          string    `db:"name" json:"name"`
+	Description   *string   `db:"description" json:"description,omitempty"`
+	Active        bool      `db:"active" json:"active"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
 }
 
 type AmbulanceAttendant struct {

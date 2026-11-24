@@ -24,6 +24,7 @@ import (
 	"ambigo-backend/internal/analytics"
 	"ambigo-backend/internal/auth"
 	"ambigo-backend/internal/dispatch"
+	"ambigo-backend/internal/eta"
 	"ambigo-backend/internal/eventbus"
 	"ambigo-backend/internal/hospital"
 	"ambigo-backend/internal/location"
@@ -162,7 +163,12 @@ func main() {
 	dispatcher := dispatch.NewDispatcher(matcher, rideStore, eventBus, wsManager)
 	dispatcher.MaxCandidates = appConfig.DispatchMaxCandidates
 	dispatcher.RadiusKm = appConfig.DispatchRadiusKm
+	dispatcher.OfferTimeoutSec = appConfig.DispatchOfferTimeoutSec
 	dispatcher.StartStaleRideCleanup()
+	etaEngine := eta.NewETAEngine(routeClient, rideStore)
+	// Seed ETA snapshots (WATCH_RIDE) from the driver's last known GPS fix.
+	etaEngine.SetDriverLocator(locationStore)
+	wsManager.ETAEngine = etaEngine
 	wsManager.SetSafetyDeps(rideStore, adminStore, ambTypeNames, safetyStateStore)
 	seedCtx, seedCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	activeRides, activeErr := rideStore.ListActiveDriverRides(seedCtx)
@@ -240,7 +246,7 @@ func main() {
 	hospitalDashboardHandler := handlers.NewHospitalDashboardHandler(rideStore, hospitalStore, adminStore, authStore, wsManager, eventBus)
 	offerHandler := handlers.NewOfferHandler(offerStore, eventBus)
 	sharedHandler := handlers.NewSharedHandler(cloudshopeService, counterStore, adminStore, hospitalStore, hospitalSeeder)
-	sharedHandler.SetAppConfig(appConfig.WithdrawalFee, 30)
+	sharedHandler.SetAppConfig(appConfig.WithdrawalFee, appConfig.DispatchOfferTimeoutSec)
 	walletHandler := handlers.NewWalletHandler(authStore, eventBus, walletStore, zwitchService)
 	walletHandler.SetWithdrawalFee(appConfig.WithdrawalFee)
 	walletHandler.SetZwitchWebhookSecret(appConfig.ZwitchWebhookSecret)
@@ -602,14 +608,24 @@ func main() {
 	mux.Handle("POST /api/v2/admin/hospital/mds/ban", requireAdmin(http.HandlerFunc(adminHandler.HandleBanHospitalMD)))
 	mux.Handle("POST /api/v2/admin/hospital/mds/unban", requireAdmin(http.HandlerFunc(adminHandler.HandleUnbanHospitalMD)))
 	mux.Handle("POST /api/v2/admin/hospital/mds/delete", requireAdmin(http.HandlerFunc(adminHandler.HandleDeleteHospitalMD)))
-	// Hospital receptionist (MD creates in admin app, receptionist logs into website)
+	// Hospital staff roles (MD creates and manages custom roles)
+	mux.Handle("POST /api/v2/hospital/roles/list", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleListStaffRoles)))
+	mux.Handle("POST /api/v2/hospital/roles/create", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleCreateStaffRole)))
+	mux.Handle("POST /api/v2/hospital/roles/delete", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleDeleteStaffRole)))
+	// Hospital receptionist / staff (MD creates in admin app, receptionist/staff logs into website)
 	mux.Handle("POST /api/v2/hospital/receptionist/create", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleCreateReceptionist)))
 	mux.Handle("POST /api/v2/hospital/receptionists/list", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleListReceptionists)))
 	mux.Handle("POST /api/v2/hospital/receptionist/delete", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleDeleteReceptionist)))
 	mux.Handle("POST /api/v2/hospital/receptionist/resend-invite", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleResendInvite)))
 	mux.Handle("POST /api/v2/hospital/receptionist/change-password", jwtAuth(http.HandlerFunc(receptionistHandler.HandleChangePassword)))
+	mux.Handle("POST /api/v2/hospital/receptionist/create-first-password", jwtAuth(http.HandlerFunc(receptionistHandler.HandleChangePassword)))
 	mux.HandleFunc("POST /api/v2/hospital/receptionist/login", middleware.RateLimit(receptionistHandler.HandleReceptionistLogin, adminLoginLimiter))
 	mux.Handle("POST /api/v2/hospital/receptionist/me", requireAnyHospital(http.HandlerFunc(receptionistHandler.HandleReceptionistMe)))
+	// Staff aliases
+	mux.Handle("POST /api/v2/hospital/staff/create", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleCreateReceptionist)))
+	mux.Handle("POST /api/v2/hospital/staff/list", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleListReceptionists)))
+	mux.Handle("POST /api/v2/hospital/staff/delete", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleDeleteReceptionist)))
+	mux.Handle("POST /api/v2/hospital/staff/resend-invite", requireHospitalMD(http.HandlerFunc(receptionistHandler.HandleResendInvite)))
 	// Hospital dashboard (for receptionist/MD)
 	mux.Handle("POST /api/v2/hospital/dashboard/stats", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalStats)))
 	mux.Handle("POST /api/v2/hospital/rides/incoming/list", requireAnyHospital(http.HandlerFunc(hospitalDashboardHandler.HandleHospitalIncomingRides)))

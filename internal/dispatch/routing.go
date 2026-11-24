@@ -72,9 +72,10 @@ func NewRouteClient(apiKey, apiURL string) *RouteClient {
 }
 
 type computeRoutesRequest struct {
-	Origin      waypoint `json:"origin"`
-	Destination waypoint `json:"destination"`
-	TravelMode  string   `json:"travelMode"` // "DRIVE"
+	Origin            waypoint `json:"origin"`
+	Destination       waypoint `json:"destination"`
+	TravelMode        string   `json:"travelMode"` // "DRIVE"
+	RoutingPreference string   `json:"routingPreference,omitempty"` // "TRAFFIC_AWARE"
 }
 
 type waypoint struct {
@@ -107,9 +108,12 @@ func haversineRoute(originLat, originLng, destLat, destLng float64) *ride.Route 
 	a := math.Sin(dlat/2)*math.Sin(dlat/2) + math.Cos(originLat*(math.Pi/180.0))*math.Cos(destLat*(math.Pi/180.0))*math.Sin(dlon/2)*math.Sin(dlon/2)
 	c := 2 * math.Atan2(math.Sqrt(a), math.Sqrt(1-a))
 	distance := R * c
-	durationSeconds := int((distance / 40.0) * 3600.0)
+	// Factor in realistic urban road detour index (~1.35x) and average ambulance transit speed (38 km/h)
+	// so that circuit-breaker fallbacks remain consistent with Google Routes API.
+	roadDistance := distance * 1.35
+	durationSeconds := int((roadDistance / 38.0) * 3600.0)
 	return &ride.Route{
-		DistanceKm:      distance,
+		DistanceKm:      roadDistance,
 		DurationSeconds: durationSeconds,
 	}
 }
@@ -136,7 +140,8 @@ func (rc *RouteClient) CalculateETA(ctx context.Context, originLat, originLng, d
 				Destination: waypoint{
 					Location: locationPayload{LatLng: latLngPayload{Latitude: destLat, Longitude: destLng}},
 				},
-				TravelMode: "DRIVE",
+				TravelMode:        "DRIVE",
+				RoutingPreference: "TRAFFIC_AWARE",
 			}
 
 			jsonData, err := json.Marshal(reqBody)
@@ -188,11 +193,17 @@ func (rc *RouteClient) CalculateETA(ctx context.Context, originLat, originLng, d
 		return nil, innerErr
 	})
 	if err != nil {
-		if errors.Is(err, gobreaker.ErrOpenState) {
-			logger.Log.Warn().Str("client", "routes").Msg("circuit breaker open, fallback to haversine")
-			return haversineRoute(originLat, originLng, destLat, destLng), nil
-		}
-		return nil, err
+		// Any upstream failure (open breaker, quota/billing 4xx-5xx, timeout,
+		// malformed body) degrades to the haversine estimate instead of
+		// surfacing a 500. Ride screens poll this endpoint for ETAs — a hard
+		// failure there leaves every accepted/ongoing screen stuck on
+		// "Calculating..." until Google recovers.
+		logger.Log.Warn().Err(err).Str("client", "routes").Msg("routes api failed, falling back to haversine")
+		return haversineRoute(originLat, originLng, destLat, destLng), nil
+	}
+	if result == nil {
+		// Defensive: a nil result without an error would nil-deref callers.
+		return haversineRoute(originLat, originLng, destLat, destLng), nil
 	}
 	return result, nil
 }

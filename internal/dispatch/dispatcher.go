@@ -18,12 +18,13 @@ import (
 )
 
 type Dispatcher struct {
-	Matcher        *Matcher
-	RideStore      RideStoreAPI
-	EventBus       *eventbus.InMemoryBus
-	WSManager      *websocket.Manager
-	MaxCandidates  int
-	RadiusKm       float64
+	Matcher         *Matcher
+	RideStore       RideStoreAPI
+	EventBus        *eventbus.InMemoryBus
+	WSManager       *websocket.Manager
+	MaxCandidates   int
+	RadiusKm        float64
+	OfferTimeoutSec int
 
 	acceptChannels  map[string]chan string
 	declineChannels map[string]chan string
@@ -57,6 +58,7 @@ func NewDispatcher(matcher *Matcher, rideStore RideStoreAPI, eventBus *eventbus.
 		WSManager:       wsManager,
 		MaxCandidates:   10,
 		RadiusKm:        10.0,
+		OfferTimeoutSec: 30,
 		acceptChannels:  make(map[string]chan string),
 		declineChannels: make(map[string]chan string),
 	}
@@ -246,9 +248,15 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 
 	startTime := time.Now()
 
+	offerTimeoutSec := d.OfferTimeoutSec
+	if offerTimeoutSec <= 0 {
+		offerTimeoutSec = 30
+	}
+	offerTimeout := time.Duration(offerTimeoutSec) * time.Second
+
 	checkTicker := time.NewTicker(5 * time.Second)
 	defer checkTicker.Stop()
-	candidateTimer := time.NewTimer(30 * time.Second)
+	candidateTimer := time.NewTimer(offerTimeout)
 	defer candidateTimer.Stop()
 
 	pickupLat2, pickupLng2 := 0.0, 0.0
@@ -303,7 +311,7 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 			IsSOS:               isSOS,
 			AmbTypeID:           ambTypeID,
 			OfferedAt:           time.Now().UTC().Format(time.RFC3339),
-			OfferExpiresIn:      30,
+			OfferExpiresIn:      offerTimeoutSec,
 			RequestID:           reqID,
 		})
 
@@ -315,7 +323,7 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 		if !candidateTimer.Stop() {
 			<-candidateTimer.C
 		}
-		candidateTimer.Reset(30 * time.Second)
+		candidateTimer.Reset(offerTimeout)
 
 		for {
 			select {
@@ -385,7 +393,7 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 				IsSOS:               isSOS,
 				AmbTypeID:           ambTypeID,
 				OfferedAt:           time.Now().UTC().Format(time.RFC3339),
-				OfferExpiresIn:      30,
+				OfferExpiresIn:      offerTimeoutSec,
 				RequestID:           reqID,
 			})
 		}
@@ -401,7 +409,7 @@ func (d *Dispatcher) startMatchingLoop(r *ride.Ride, reqID string) {
 			default:
 			}
 		}
-		candidateTimer.Reset(30 * time.Second)
+		candidateTimer.Reset(offerTimeout)
 
 		declined := 0
 		for {

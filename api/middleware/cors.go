@@ -15,7 +15,10 @@ var allowedOrigins = []string{
 	"https://admin-website-ops.onrender.com",
 	"https://ambigo-server-559193701066.asia-south1.run.app",
 	"https://go-backend-viu3.onrender.com",
+	"http://localhost",
 	"http://localhost:",
+	"http://127.0.0.1",
+	"http://127.0.0.1:",
 	"capacitor://",
 }
 
@@ -23,13 +26,22 @@ func isAllowedOrigin(origin string) bool {
 	if origin == "" {
 		return true // non-browser (Flutter) — no Origin header
 	}
+	origin = strings.TrimRight(origin, "/")
 	for _, ao := range allowedOrigins {
-		if origin == ao || (len(origin) >= len(ao) && origin[:len(ao)] == ao) {
+		aoTrimmed := strings.TrimRight(ao, "/")
+		if origin == aoTrimmed || strings.HasPrefix(origin, ao) {
 			return true
 		}
 	}
-	// Allow Netlify preview deploys: e.g. https://deploy-preview-123--hospital-ambigo.netlify.app
-	if strings.HasSuffix(origin, ".netlify.app") && strings.Contains(origin, "hospital-ambigo") {
+	// Allow any local loopback or private network development origin
+	if strings.HasPrefix(origin, "http://localhost") ||
+		strings.HasPrefix(origin, "http://127.0.0.1") ||
+		strings.HasPrefix(origin, "http://192.168.") ||
+		strings.HasPrefix(origin, "http://10.") {
+		return true
+	}
+	// Allow Netlify deploys and preview deploys
+	if strings.HasSuffix(origin, ".netlify.app") {
 		return true
 	}
 	// Allow any subdomain of ambigo.in (hospital/admin etc)
@@ -43,7 +55,7 @@ func isAllowedOrigin(origin string) bool {
 	// Allow any custom origins specified via ALLOWED_ORIGINS env var (comma-separated)
 	if custom := os.Getenv("ALLOWED_ORIGINS"); custom != "" {
 		for _, co := range strings.Split(custom, ",") {
-			co = strings.TrimSpace(co)
+			co = strings.TrimSpace(strings.TrimRight(co, "/"))
 			if co != "" && (origin == co || strings.HasPrefix(origin, co)) {
 				return true
 			}

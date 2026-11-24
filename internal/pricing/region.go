@@ -447,6 +447,28 @@ func (s *RegionStore) GetRegionPrice(ctx context.Context, regionID, ambTypeID st
 	return &p, nil
 }
 
+// GetRegionPriceWithParent looks up the price override for a region.
+// If the region does not define an override for this ambulance type,
+// it walks up the parent chain (e.g. district -> state) to find one.
+func (s *RegionStore) GetRegionPriceWithParent(ctx context.Context, regionID, ambTypeID string) (*RegionPrice, error) {
+	currID := regionID
+	for currID != "" {
+		p, err := s.GetRegionPrice(ctx, currID, ambTypeID)
+		if err != nil {
+			return nil, err
+		}
+		if p != nil {
+			return p, nil
+		}
+		r, err := s.GetRegion(ctx, currID)
+		if err != nil || r == nil || r.ParentID == nil || *r.ParentID == "" {
+			break
+		}
+		currID = *r.ParentID
+	}
+	return nil, nil
+}
+
 // ResolvedPrice is the effective fare config for a pickup.
 type ResolvedPrice struct {
 	RegionID         *string
@@ -475,15 +497,9 @@ func (s *RegionStore) ResolvePriceForPickup(ctx context.Context, lat, lng float6
 		return base, errNoRegion
 	}
 	rid := region.ID
-	override, err := s.GetRegionPrice(ctx, region.ID, ambTypeID)
+	override, err := s.GetRegionPriceWithParent(ctx, region.ID, ambTypeID)
 	if err != nil {
 		return base, err
-	}
-	if override == nil && region.ParentID != nil && *region.ParentID != "" {
-		override, err = s.GetRegionPrice(ctx, *region.ParentID, ambTypeID)
-		if err != nil {
-			return base, err
-		}
 	}
 	if override == nil {
 		return base, errNoPrice

@@ -394,3 +394,22 @@ func TestBroadcastMultiRing10KmRadius(t *testing.T) {
 		t.Fatal("driver d-15km outside 10km radius should NOT receive offer")
 	}
 }
+
+func TestBroadcastConfigurableOfferTimeout(t *testing.T) {
+	drivers := []string{"d1", "d2"}
+	d, _, bus := testBroadcastWorld(t, drivers)
+	d.OfferTimeoutSec = 120 // 2 minutes
+	offeredCh := bus.SubscribeWithChan(eventbus.ChannelRideDriverOffered)
+
+	r := newBroadcastTestRide()
+	if err := d.RequestRide(context.Background(), r); err != nil {
+		t.Fatal(err)
+	}
+
+	offers := collectOffered(t, offeredCh, 2)
+	for _, o := range offers {
+		if o.OfferExpiresIn != 120 {
+			t.Fatalf("expected OfferExpiresIn=120, got %d", o.OfferExpiresIn)
+		}
+	}
+}

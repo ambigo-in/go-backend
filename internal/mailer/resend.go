@@ -38,7 +38,11 @@ func NewResendMailer(cfg *config.AppConfig) *ResendMailer {
 
 // SendReceptionistInvite sends temp credentials. In test mode (useVerified=false) it sends to RESEND_TO_TEST
 // and logs the real recipient to avoid Domain not verified errors while ambigo.in is verifying.
-func (m *ResendMailer) SendReceptionistInvite(realEmail, username, tempPassword, hospitalName string) error {
+func (m *ResendMailer) SendReceptionistInvite(realEmail, username, tempPassword, hospitalName string, roleName ...string) error {
+	role := "staff"
+	if len(roleName) > 0 && roleName[0] != "" {
+		role = roleName[0]
+	}
 	if m.client == nil {
 		logger.Log.Info().Str("to", realEmail).Str("username", username).Msg("[RESEND TEST MODE] Would send invite email (no API key)")
 		return nil
@@ -52,20 +56,30 @@ func (m *ResendMailer) SendReceptionistInvite(realEmail, username, tempPassword,
 		logger.Log.Info().Str("real_to", realEmail).Str("test_to", to).Str("username", username).Msg("Resend test mode: redirecting email to test inbox")
 	}
 	from := fmt.Sprintf("%s <%s>", m.fromName, m.fromEmail)
-	subject := fmt.Sprintf("Your %s receptionist account", hospitalName)
+	subject := fmt.Sprintf("Your %s %s account credentials", hospitalName, role)
+	portalURL := "https://hospital-ambigo.netlify.app"
 	html := fmt.Sprintf(`
-		<div style="font-family: sans-serif; max-width: 600px; margin: 0 auto;">
-			<h2 style="color: #FF520D;">Welcome to Ambigo</h2>
-			<p>Your receptionist account has been created for <b>%s</b>.</p>
-			<table style="background: #f8f8f8; padding: 16px; border-radius: 8px; width: 100%%;">
-				<tr><td><b>Username</b></td><td>%s</td></tr>
-				<tr><td><b>Temporary password</b></td><td><code style="background: #fff; padding: 4px 8px; border-radius: 4px;">%s</code></td></tr>
-				<tr><td><b>Login</b></td><td>Log in via the Hospital section in the Ambigo app using your username and temporary password.</td></tr>
+		<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 24px; border: 1px solid #FFE4CC; border-radius: 12px; background: #ffffff;">
+			<div style="margin-bottom: 20px;">
+				<span style="color: #FF520D; font-size: 24px; font-weight: 800;">Ambigo</span>
+				<span style="color: #333333; font-size: 24px; font-weight: 300;"> Hospital</span>
+			</div>
+			<h2 style="color: #111827; margin-top: 0;">Welcome to Ambigo</h2>
+			<p style="color: #4B5563; font-size: 15px; line-height: 1.5;">Your <b>%s</b> account has been created for <b>%s</b>.</p>
+			<table style="background: #F9FAFB; padding: 16px; border-radius: 8px; width: 100%%; border: 1px solid #E5E7EB; margin: 20px 0;">
+				<tr><td style="padding: 6px 0; color: #6B7280; font-size: 14px;"><b>Role</b></td><td style="padding: 6px 0; color: #111827; font-weight: 600;">%s</td></tr>
+				<tr><td style="padding: 6px 0; color: #6B7280; font-size: 14px;"><b>Username</b></td><td style="padding: 6px 0; color: #111827; font-weight: 600;">%s</td></tr>
+				<tr><td style="padding: 6px 0; color: #6B7280; font-size: 14px;"><b>Temporary Password</b></td><td style="padding: 6px 0;"><code style="background: #FFF; padding: 4px 8px; border-radius: 4px; border: 1px solid #D1D5DB; font-weight: bold; color: #FF520D;">%s</code></td></tr>
+				<tr><td style="padding: 6px 0; color: #6B7280; font-size: 14px;"><b>Portal URL</b></td><td style="padding: 6px 0;"><a href="%s" target="_blank" style="color: #FF520D; word-break: break-all; font-weight: 600;">%s</a></td></tr>
 			</table>
-			<p style="color: #666; font-size: 12px;">You will be asked to change your password on first login.</p>
-			<p style="color: #666; font-size: 12px;">If not in test mode, original recipient: %s</p>
+			<div style="margin: 25px 0; text-align: center;">
+				<a href="%s" target="_blank" style="display: inline-block; background: #FF520D; color: #ffffff; padding: 12px 28px; text-decoration: none; border-radius: 8px; font-weight: 700; font-size: 15px;">Log in to Hospital Portal</a>
+			</div>
+			<p style="color: #6B7280; font-size: 13px; line-height: 1.4;">You will be asked to change your temporary password upon your first login.</p>
+			<hr style="border: none; border-top: 1px solid #F3F4F6; margin: 20px 0;" />
+			<p style="color: #9CA3AF; font-size: 11px;">If you have any questions, please contact your Hospital MD Administrator.</p>
 		</div>
-	`, hospitalName, username, tempPassword, realEmail)
+	`, role, hospitalName, role, username, tempPassword, portalURL, portalURL, portalURL)
 
 	params := &resend.SendEmailRequest{
 		From:    from,

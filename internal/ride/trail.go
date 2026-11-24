@@ -17,8 +17,8 @@ type TrailPoint struct {
 
 // Gated recalc thresholds (Uber-style, simplified for Ambigo).
 const (
-	// DropGateMeters: final drop within this of planned drop = same place.
-	DropGateMeters = 500.0
+	// DropGateMeters: final drop within this of planned drop = same place (1km to cover hospital campuses/large complexes).
+	DropGateMeters = 1000.0
 	// DetourPct: trail must exceed estimate by this fraction...
 	DetourPct = 0.20
 	// ...AND by this absolute km (protects short trips).

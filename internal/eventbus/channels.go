@@ -48,7 +48,23 @@ const (
 	// the user or an assigned attendant. The SOS/condition queue and history
 	// depend on this event (audit + analytics).
 	ChannelRideConditionUpdated = "ride:condition_updated"
+	// ChannelRideETAUpdate is published when canonical server-side ETA is computed
+	// for an active ride.
+	ChannelRideETAUpdate = "ride:eta_update"
 )
+
+// RideETAUpdatePayload carries the canonical server-side ETA broadcast to watchers.
+type RideETAUpdatePayload struct {
+	RideID          string  `json:"ride_id"`
+	DriverID        string  `json:"driver_id,omitempty"`
+	Stage           string  `json:"stage"` // "en_route_pickup" | "at_pickup" | "en_route_hospital"
+	RemainingSecs   int     `json:"remaining_seconds"`
+	RemainingKm     float64 `json:"remaining_km"`
+	HospitalETASecs int     `json:"hospital_eta_seconds,omitempty"`
+	HospitalETAKm   float64 `json:"hospital_eta_km,omitempty"`
+	IsTrafficAware  bool    `json:"is_traffic_aware"`
+	RequestID       string  `json:"request_id,omitempty"`
+}
 
 // RideDestinationChangedPayload carries the complete new destination so the
 // user app can update its screen without an extra detail fetch.

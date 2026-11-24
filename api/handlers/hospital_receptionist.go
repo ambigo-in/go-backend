@@ -92,9 +92,11 @@ func (h *HospitalReceptionistHandler) HandleCreateReceptionist(w http.ResponseWr
 		return
 	}
 	var req struct {
-		Name   string `json:"name"`
-		Email  string `json:"email"`
-		Mobile string `json:"mobile"`
+		Name   string  `json:"name"`
+		Email  string  `json:"email"`
+		Mobile string  `json:"mobile"`
+		Role   string  `json:"role"`
+		RoleID *string `json:"role_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, "Invalid payload", http.StatusBadRequest)
@@ -102,8 +104,29 @@ func (h *HospitalReceptionistHandler) HandleCreateReceptionist(w http.ResponseWr
 	}
 	req.Name = strings.TrimSpace(req.Name)
 	req.Email = strings.TrimSpace(strings.ToLower(req.Email))
+	req.Role = strings.TrimSpace(req.Role)
+	if req.RoleID != nil && strings.TrimSpace(*req.RoleID) != "" {
+		trimmedRoleID := strings.TrimSpace(*req.RoleID)
+		req.RoleID = &trimmedRoleID
+		staffRole, err := h.AuthStore.FindHospitalStaffRoleByID(r.Context(), *req.RoleID)
+		if err == nil && staffRole != nil {
+			if staffRole.HospitalID != *md.HospitalID {
+				response.Error(w, "Role does not belong to this hospital", http.StatusBadRequest)
+				return
+			}
+			if req.Role == "" {
+				req.Role = staffRole.Name
+			}
+		}
+	} else {
+		req.RoleID = nil
+	}
 	if req.Name == "" {
 		response.Error(w, "Name required", http.StatusBadRequest)
+		return
+	}
+	if req.Role == "" {
+		response.Error(w, "Role required", http.StatusBadRequest)
 		return
 	}
 	if !emailRegex.MatchString(req.Email) {
@@ -149,6 +172,8 @@ func (h *HospitalReceptionistHandler) HandleCreateReceptionist(w http.ResponseWr
 		Email:              &emailLower,
 		PasswordHash:       hashStr,
 		Mobile:             mobilePtr,
+		Role:               req.Role,
+		RoleID:             req.RoleID,
 		Active:             true,
 		Status:             "invited",
 		MustChangePassword: true,
@@ -160,13 +185,20 @@ func (h *HospitalReceptionistHandler) HandleCreateReceptionist(w http.ResponseWr
 	// send invite email (test mode will redirect to delivered@resend.dev)
 	hospitalName := "Ambigo Hospital"
 	if h.Mailer != nil {
-		if err := h.Mailer.SendReceptionistInvite(emailLower, username, tempPass, hospitalName); err != nil {
+		if err := h.Mailer.SendReceptionistInvite(emailLower, username, tempPass, hospitalName, req.Role); err != nil {
 			logger.Log.Error().Err(err).Str("email", emailLower).Msg("Failed to send receptionist invite email")
 			// not failing creation, allow resend later
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"detail": "Receptionist created, invite sent", "id": recept.ID, "username": username, "email": emailLower})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"detail":   "Staff member created, invite sent",
+		"id":       recept.ID,
+		"username": username,
+		"email":    emailLower,
+		"role":     recept.Role,
+		"role_id":  recept.RoleID,
+	})
 }
 
 func (h *HospitalReceptionistHandler) HandleListReceptionists(w http.ResponseWriter, r *http.Request) {
@@ -186,12 +218,14 @@ func (h *HospitalReceptionistHandler) HandleListReceptionists(w http.ResponseWri
 		response.Error(w, "Failed to fetch", http.StatusInternalServerError)
 		return
 	}
-	// Return minimal view for MD: email, username, status, delete. But return full struct filtered.
+	// Return minimal view for MD: email, username, status, role, delete. But return full struct filtered.
 	type view struct {
 		ID                 string  `json:"_id"`
 		Email              *string `json:"email,omitempty"`
 		Username           string  `json:"username"`
 		Name               string  `json:"name"`
+		Role               string  `json:"role"`
+		RoleID             *string `json:"role_id,omitempty"`
 		Status             string  `json:"status"`
 		MustChangePassword bool    `json:"must_change_password"`
 		Active             bool    `json:"active"`
@@ -203,6 +237,8 @@ func (h *HospitalReceptionistHandler) HandleListReceptionists(w http.ResponseWri
 			Email:              rec.Email,
 			Username:           rec.Username,
 			Name:               rec.Name,
+			Role:               rec.Role,
+			RoleID:             rec.RoleID,
 			Status:             rec.Status,
 			MustChangePassword: rec.MustChangePassword,
 			Active:             rec.Active,
@@ -308,7 +344,7 @@ func (h *HospitalReceptionistHandler) HandleResendInvite(w http.ResponseWriter, 
 	}
 	if h.Mailer != nil {
 		hospitalName := "Ambigo Hospital"
-		if err := h.Mailer.SendReceptionistInvite(*recept.Email, recept.Username, tempPass, hospitalName); err != nil {
+		if err := h.Mailer.SendReceptionistInvite(*recept.Email, recept.Username, tempPass, hospitalName, recept.Role); err != nil {
 			logger.Log.Error().Err(err).Msg("Resend invite failed")
 			response.Error(w, "Failed to send email", http.StatusInternalServerError)
 			return
@@ -346,9 +382,20 @@ func (h *HospitalReceptionistHandler) HandleChangePassword(w http.ResponseWriter
 		response.Error(w, "Not found", http.StatusNotFound)
 		return
 	}
-	if bcrypt.CompareHashAndPassword([]byte(recept.PasswordHash), []byte(req.OldPassword)) != nil {
-		response.Error(w, "Old password incorrect", http.StatusUnauthorized)
-		return
+	if !recept.MustChangePassword {
+		if req.OldPassword == "" {
+			response.Error(w, "Current password required", http.StatusBadRequest)
+			return
+		}
+		if bcrypt.CompareHashAndPassword([]byte(recept.PasswordHash), []byte(req.OldPassword)) != nil {
+			response.Error(w, "Current password incorrect", http.StatusUnauthorized)
+			return
+		}
+	} else if req.OldPassword != "" {
+		if bcrypt.CompareHashAndPassword([]byte(recept.PasswordHash), []byte(req.OldPassword)) != nil {
+			response.Error(w, "Temporary password incorrect", http.StatusUnauthorized)
+			return
+		}
 	}
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
 	if err != nil {
@@ -405,6 +452,8 @@ func (h *HospitalReceptionistHandler) HandleReceptionistLogin(w http.ResponseWri
 		"refresh_token":        refreshStr,
 		"session_id":           sessionID,
 		"role":                 "hospital_receptionist",
+		"staff_role":           recept.Role,
+		"role_id":              recept.RoleID,
 		"hospital_id":          recept.HospitalID,
 		"must_change_password": recept.MustChangePassword,
 		"status":               recept.Status,
@@ -435,6 +484,8 @@ func (h *HospitalReceptionistHandler) HandleReceptionistMe(w http.ResponseWriter
 				"name":                 recept.Name,
 				"hospital_id":          recept.HospitalID,
 				"role":                 "hospital_receptionist",
+				"staff_role":           recept.Role,
+				"role_id":              recept.RoleID,
 				"status":               recept.Status,
 				"must_change_password": recept.MustChangePassword,
 			})
@@ -460,4 +511,124 @@ func (h *HospitalReceptionistHandler) HandleReceptionistMe(w http.ResponseWriter
 		return
 	}
 	response.Error(w, "Not found", http.StatusNotFound)
+}
+
+// HandleListStaffRoles retrieves all custom staff roles created by the MD for this hospital
+func (h *HospitalReceptionistHandler) HandleListStaffRoles(w http.ResponseWriter, r *http.Request) {
+	mdIDStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role, _ := r.Context().Value(middleware.UserRoleKey).(string)
+	if role != "hospital_md" {
+		response.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	md, err := h.AuthStore.FindHospitalMDByID(r.Context(), mdIDStr)
+	if err != nil || md == nil || md.HospitalID == nil {
+		response.Error(w, "MD not linked to hospital", http.StatusBadRequest)
+		return
+	}
+	roles, err := h.AuthStore.ListHospitalStaffRoles(r.Context(), *md.HospitalID)
+	if err != nil {
+		response.Error(w, "Failed to fetch roles", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(roles)
+}
+
+// HandleCreateStaffRole creates a new custom staff role for the MD's hospital
+func (h *HospitalReceptionistHandler) HandleCreateStaffRole(w http.ResponseWriter, r *http.Request) {
+	mdIDStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role, _ := r.Context().Value(middleware.UserRoleKey).(string)
+	if role != "hospital_md" {
+		response.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	md, err := h.AuthStore.FindHospitalMDByID(r.Context(), mdIDStr)
+	if err != nil || md == nil || md.HospitalID == nil {
+		response.Error(w, "MD not linked to hospital", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		Name        string  `json:"name"`
+		Description *string `json:"description"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	name := strings.TrimSpace(req.Name)
+	if name == "" {
+		response.Error(w, "Role name is required", http.StatusBadRequest)
+		return
+	}
+	newRole := &auth.HospitalStaffRole{
+		HospitalID:    *md.HospitalID,
+		CreatedByMDID: md.ID,
+		Name:          name,
+		Description:   req.Description,
+		Active:        true,
+	}
+	if err := h.AuthStore.CreateHospitalStaffRole(r.Context(), newRole); err != nil {
+		if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique") {
+			response.Error(w, "A role with this name already exists", http.StatusConflict)
+			return
+		}
+		response.Error(w, "Failed to create role", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(newRole)
+}
+
+// HandleDeleteStaffRole deletes a staff role
+func (h *HospitalReceptionistHandler) HandleDeleteStaffRole(w http.ResponseWriter, r *http.Request) {
+	mdIDStr, ok := r.Context().Value(middleware.UserIDKey).(string)
+	if !ok {
+		response.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	role, _ := r.Context().Value(middleware.UserRoleKey).(string)
+	if role != "hospital_md" {
+		response.Error(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	md, err := h.AuthStore.FindHospitalMDByID(r.Context(), mdIDStr)
+	if err != nil || md == nil || md.HospitalID == nil {
+		response.Error(w, "MD not linked to hospital", http.StatusBadRequest)
+		return
+	}
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, "Invalid payload", http.StatusBadRequest)
+		return
+	}
+	if !ids.IsValid(req.ID) {
+		response.Error(w, "Invalid role ID", http.StatusBadRequest)
+		return
+	}
+	staffRole, err := h.AuthStore.FindHospitalStaffRoleByID(r.Context(), req.ID)
+	if err != nil || staffRole == nil {
+		response.Error(w, "Role not found", http.StatusNotFound)
+		return
+	}
+	if staffRole.HospitalID != *md.HospitalID {
+		response.Error(w, "Forbidden: different hospital", http.StatusForbidden)
+		return
+	}
+	if err := h.AuthStore.DeleteHospitalStaffRole(r.Context(), req.ID); err != nil {
+		response.Error(w, "Delete failed", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"detail": "Role deleted"})
 }

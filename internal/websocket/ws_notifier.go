@@ -26,6 +26,7 @@ func (n *WSNotifier) SubscribeTo(bus *eventbus.InMemoryBus) {
 	bus.Subscribe(eventbus.ChannelRideCompleted, n.handleRideCompleted)
 	bus.Subscribe(eventbus.ChannelRideCancelled, n.handleRideCancelled)
 	bus.Subscribe(eventbus.ChannelDriverLocationUpdate, n.handleDriverLocationUpdate)
+	bus.Subscribe(eventbus.ChannelRideETAUpdate, n.handleRideETAUpdate)
 	bus.Subscribe(eventbus.ChannelAuthSessionReplaced, n.handleSessionReplaced)
 	bus.Subscribe(eventbus.ChannelSafetyStoppedWarn, n.handleSafetyStoppedWarn)
 	bus.Subscribe(eventbus.ChannelSafetyStoppedAlarm, n.handleSafetyStoppedAlarm)
@@ -171,6 +172,15 @@ func (n *WSNotifier) handleRideCancelled(payload []byte) {
 		})
 	}
 	n.wsManager.SendToRideWatchers(p.RideID, "RIDE_UPDATE", msg)
+}
+
+func (n *WSNotifier) handleRideETAUpdate(payload []byte) {
+	var p eventbus.RideETAUpdatePayload
+	if err := json.Unmarshal(payload, &p); err != nil {
+		logger.Log.Error().Err(err).Str("channel", "ride:eta_update").Msg("Unmarshal error")
+		return
+	}
+	n.wsManager.SendToRideWatchers(p.RideID, EventRideETAUpdate, p)
 }
 
 func (n *WSNotifier) handleDriverLocationUpdate(payload []byte) {
