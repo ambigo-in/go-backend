@@ -1,5 +1,5 @@
 -- +goose Up
-CREATE TABLE safety_alerts (
+CREATE TABLE IF NOT EXISTS safety_alerts (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     ride_id          UUID NOT NULL REFERENCES rides(id) ON DELETE CASCADE,
     user_id          UUID REFERENCES users(id) ON DELETE SET NULL,
@@ -19,15 +19,16 @@ CREATE TABLE safety_alerts (
     resolved_by      UUID REFERENCES admins(id) ON DELETE SET NULL,
     resolution       TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX safety_alerts_status_raised_idx ON safety_alerts(status, raised_at DESC);
-CREATE INDEX safety_alerts_ride_idx ON safety_alerts(ride_id, raised_at DESC);
+CREATE INDEX IF NOT EXISTS safety_alerts_status_raised_idx ON safety_alerts(status, raised_at DESC);
+CREATE INDEX IF NOT EXISTS safety_alerts_ride_idx ON safety_alerts(ride_id, raised_at DESC);
 
 INSERT INTO safety_alerts (ride_id, user_id, driver_id, alert_type, location_label, raised_at)
 SELECT id, user_id, driver_id,
        CASE WHEN emergency_type = 'stopped_vehicle' THEN 'stopped_vehicle' ELSE 'sos_booking' END,
        pickup_address, created_at
 FROM rides
-WHERE emergency_priority > 0 AND status NOT IN ('COMPLETED','CANCELLED');
+WHERE emergency_priority > 0 AND status NOT IN ('COMPLETED','CANCELLED')
+ON CONFLICT DO NOTHING;
 
 -- +goose Down
 DROP TABLE IF EXISTS safety_alerts;

@@ -102,6 +102,10 @@ func NewFCMClient(ctx context.Context, credentialsPath string) *FCMClient {
 // that is not in the foreground.
 func iosSilentPayload() *messaging.APNSConfig {
 	return &messaging.APNSConfig{
+		Headers: map[string]string{
+			"apns-push-type": "background",
+			"apns-priority":  "5",
+		},
 		Payload: &messaging.APNSPayload{Aps: &messaging.Aps{ContentAvailable: true}},
 	}
 }
@@ -118,6 +122,10 @@ func iosSilentPayload() *messaging.APNSConfig {
 // one of the two modes.
 func iosAlertPayload(title, body string) *messaging.APNSConfig {
 	return &messaging.APNSConfig{
+		Headers: map[string]string{
+			"apns-push-type": "alert",
+			"apns-priority":  "10",
+		},
 		Payload: &messaging.APNSPayload{Aps: &messaging.Aps{
 			Alert: &messaging.ApsAlert{Title: title, Body: body},
 			Sound: "default",
@@ -215,10 +223,19 @@ func (f *FCMClient) SendAlertMessage(ctx context.Context, token, title, body str
 				DefaultSound: true,
 			},
 		},
-		// The Notification block already gives iOS its banner, but iOS plays
-		// nothing unless the aps dict also asks for a sound.
+		// The Notification block gives Android its banner, while the APNS block
+		// explicitly defines the iOS alert banner, sound, and APNs headers.
 		APNS: &messaging.APNSConfig{
-			Payload: &messaging.APNSPayload{Aps: &messaging.Aps{Sound: "default"}},
+			Headers: map[string]string{
+				"apns-push-type": "alert",
+				"apns-priority":  "10",
+			},
+			Payload: &messaging.APNSPayload{
+				Aps: &messaging.Aps{
+					Alert: &messaging.ApsAlert{Title: title, Body: body},
+					Sound: "default",
+				},
+			},
 		},
 	})
 }
