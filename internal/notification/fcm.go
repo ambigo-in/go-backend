@@ -252,3 +252,29 @@ func (f *FCMClient) SendDataMessage(ctx context.Context, token string, data map[
 func (f *FCMClient) SendVisibleDataMessage(ctx context.Context, token string, data map[string]string) error {
 	return f.send(ctx, dataMessage(token, data, iosAlertPayload(data["title"], data["body"])))
 }
+
+// SendRideOfferAlertMessage sends a time-sensitive ride offer push with custom sound,
+// RIDE_OFFER_CATEGORY for interactive action buttons, and full location data for iOS.
+func (f *FCMClient) SendRideOfferAlertMessage(ctx context.Context, token string, data map[string]string) error {
+	apns := &messaging.APNSConfig{
+		Headers: map[string]string{
+			"apns-push-type": "alert",
+			"apns-priority":  "10",
+		},
+		Payload: &messaging.APNSPayload{
+			Aps: &messaging.Aps{
+				Alert: &messaging.ApsAlert{
+					Title: data["title"],
+					Body:  data["body"],
+				},
+				Sound:          "ride-notification.wav",
+				Category:       "RIDE_OFFER_CATEGORY",
+				MutableContent: true,
+				CustomData: map[string]interface{}{
+					"interruption-level": "time-sensitive",
+				},
+			},
+		},
+	}
+	return f.send(ctx, dataMessage(token, data, apns))
+}

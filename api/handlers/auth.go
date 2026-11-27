@@ -258,6 +258,9 @@ func (h *AuthHandler) HandleUserVerifyOTP(w http.ResponseWriter, r *http.Request
 	}
 	// Session-scoped push token for the single-session kill-switch.
 	_ = h.AuthStore.SetSessionFCMToken(r.Context(), user.ID, sessionID, payload.FCMToken)
+	if payload.FCMToken != "" {
+		_ = h.AuthStore.UpdateUserFCM(r.Context(), user.ID, payload.FCMToken)
+	}
 
 	h.AuthStore.UpdateUserJWT(r.Context(), user.ID, accessToken)
 
@@ -461,6 +464,9 @@ func (h *AuthHandler) HandleDriverVerifyOTP(w http.ResponseWriter, r *http.Reque
 	}
 	// Session-scoped push token for the single-session kill-switch.
 	_ = h.AuthStore.SetSessionFCMToken(r.Context(), driverID, sessionID, payload.FCMToken)
+	if payload.FCMToken != "" && role == "driver" {
+		_ = h.AuthStore.UpdateDriverFCM(r.Context(), driverID, payload.FCMToken)
+	}
 
 	if role == "driver" {
 		h.AuthStore.UpdateDriverJWT(r.Context(), driverID, accessToken)
@@ -517,6 +523,13 @@ func (h *AuthHandler) HandleRefreshToken(w http.ResponseWriter, r *http.Request)
 		newRT, newTokenStr, err := h.AuthStore.RotateById(r.Context(), tokenDoc, payload.DeviceID, payload.DeviceName)
 		if err == nil {
 			_ = h.AuthStore.SetSessionFCMToken(r.Context(), newRT.UserID, newRT.SessionID, payload.FCMToken)
+			if payload.FCMToken != "" {
+				if newRT.Role == "user" {
+					_ = h.AuthStore.UpdateUserFCM(r.Context(), newRT.UserID, payload.FCMToken)
+				} else if newRT.Role == "driver" {
+					_ = h.AuthStore.UpdateDriverFCM(r.Context(), newRT.UserID, payload.FCMToken)
+				}
+			}
 			newAccessToken, err := h.generateAccessTokenForRole(r.Context(), newRT)
 			if err != nil {
 				response.Error(w, "Failed to generate token", http.StatusInternalServerError)
@@ -558,6 +571,13 @@ func (h *AuthHandler) HandleRefreshToken(w http.ResponseWriter, r *http.Request)
 			newRT, newTokenStr, err := h.AuthStore.RotateById(r.Context(), liveToken, payload.DeviceID, payload.DeviceName)
 			if err == nil {
 				_ = h.AuthStore.SetSessionFCMToken(r.Context(), newRT.UserID, newRT.SessionID, payload.FCMToken)
+			if payload.FCMToken != "" {
+				if newRT.Role == "user" {
+					_ = h.AuthStore.UpdateUserFCM(r.Context(), newRT.UserID, payload.FCMToken)
+				} else if newRT.Role == "driver" {
+					_ = h.AuthStore.UpdateDriverFCM(r.Context(), newRT.UserID, payload.FCMToken)
+				}
+			}
 				newAccessToken, err := h.generateAccessTokenForRole(r.Context(), newRT)
 				if err != nil {
 					response.Error(w, "Failed to generate token", http.StatusInternalServerError)

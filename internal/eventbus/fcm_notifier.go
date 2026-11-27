@@ -134,7 +134,7 @@ func (n *FCMNotifier) handleRideOffered(payload []byte) {
 		data["is_sos"] = "false"
 	}
 
-	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendRideOfferAlertMessage(ctx, *token, data); err != nil {
 		ll.Error().Err(err).Str("driver_id", p.DriverID).Msg("FCM push failed for driver")
 	}
 }
@@ -355,7 +355,7 @@ func (n *FCMNotifier) handleRideCompleted(payload []byte) {
 		"body":             fmt.Sprintf("Ride completed. Total fare ₹%.2f.", p.FinalAmount),
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		logger.Log.Error().Err(err).Str("user_id", p.UserID).Msg("Ride completed FCM push failed for user")
 	}
 }
@@ -487,7 +487,7 @@ func (n *FCMNotifier) handleDriverApproved(payload []byte) {
 		"body":  "Your driver account has been approved. Please login again.",
 	}
 
-	if err := n.fcmClient.SendDataMessage(ctx, *token, data); err != nil {
+	if err := n.fcmClient.SendVisibleDataMessage(ctx, *token, data); err != nil {
 		ll.Error().Err(err).Str("driver_id", p.DriverID).Msg("Welcome FCM push failed for driver")
 	}
 }
