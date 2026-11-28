@@ -254,7 +254,7 @@ func (f *FCMClient) SendVisibleDataMessage(ctx context.Context, token string, da
 }
 
 // SendRideOfferAlertMessage sends a time-sensitive ride offer push with custom sound,
-// RIDE_OFFER_CATEGORY for interactive action buttons, and full location data for iOS.
+// and RIDE_OFFER_CATEGORY for interactive [View Offer] and [Decline] action buttons on iOS.
 func (f *FCMClient) SendRideOfferAlertMessage(ctx context.Context, token string, data map[string]string) error {
 	apns := &messaging.APNSConfig{
 		Headers: map[string]string{
@@ -267,9 +267,8 @@ func (f *FCMClient) SendRideOfferAlertMessage(ctx context.Context, token string,
 					Title: data["title"],
 					Body:  data["body"],
 				},
-				Sound:          "ride-notification.wav",
-				Category:       "RIDE_OFFER_CATEGORY",
-				MutableContent: true,
+				Sound:    "ride-notification.wav",
+				Category: "RIDE_OFFER_CATEGORY",
 				CustomData: map[string]interface{}{
 					"interruption-level": "time-sensitive",
 				},

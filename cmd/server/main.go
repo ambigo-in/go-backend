@@ -320,9 +320,10 @@ func main() {
 	}
 
 	// Rate limiters
-	otpIPLimiter := middleware.NewIPLimiter(3, 5)                // V1: IP-based for OTP request
-	verifyMobileLimiter := middleware.NewMobileRateLimiter(3, 5) // V1: mobile-based for OTP verify
-	adminLoginLimiter := middleware.NewIPLimiter(5, 10)          // V7: IP-based for admin login
+	otpIPLimiter := middleware.NewIPLimiter(3, 5)                              // V1: IP-based for OTP request
+	verifyMobileLimiter := middleware.NewMobileRateLimiter(3, 5)               // V1: mobile-based for OTP verify
+	adminLoginLimiter := middleware.NewIPLimiter(5, 10)                        // V7: IP-based for admin login
+	refreshIPLimiter := middleware.NewIPLimiter(rate.Every(10*time.Second), 5) // Rate-limit refresh calls: burst 5, max 1 every 10s
 	// A5: Global per-IP limit for all authenticated routes. Load-test
 	// override via GLOBAL_RPS_LIMIT / GLOBAL_RPS_BURST (single-IP k6 would
 	// otherwise measure the limiter, not capacity). Production default 100/200.
@@ -487,7 +488,7 @@ func main() {
 	mux.HandleFunc("POST /api/v2/auth/driver/request-otp", middleware.RateLimit(authHandler.HandleDriverRequestOTP, otpIPLimiter))
 	mux.HandleFunc("POST /api/v2/auth/driver/verify-otp", middleware.RateLimitMobile(authHandler.HandleDriverVerifyOTP, verifyMobileLimiter))
 	// V8: Token refresh, V4: Logout, V18: Sessions
-	mux.HandleFunc("POST /api/v2/auth/refresh", authHandler.HandleRefreshToken)
+	mux.HandleFunc("POST /api/v2/auth/refresh", middleware.RateLimit(authHandler.HandleRefreshToken, refreshIPLimiter))
 	mux.Handle("POST /api/v2/auth/logout", jwtAuth(http.HandlerFunc(authHandler.HandleLogout)))
 	mux.Handle("POST /api/v2/auth/sessions", jwtAuth(http.HandlerFunc(authHandler.HandleListSessions)))
 	mux.Handle("POST /api/v2/auth/sessions/revoke", jwtAuth(http.HandlerFunc(authHandler.HandleRevokeSession)))
